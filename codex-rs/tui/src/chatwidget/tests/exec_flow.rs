@@ -347,6 +347,62 @@ async fn exec_history_cell_shows_working_then_failed() {
 }
 
 #[tokio::test]
+async fn exec_success_with_buddy_emits_history_feedback() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    install_test_companion(&mut chat, "INTJ", /*muted*/ false, Some("on"));
+
+    let begin = begin_exec(&mut chat, "call-buddy-exec", "echo done");
+    let _ = drain_insert_history(&mut rx);
+
+    end_exec(&mut chat, begin, "done", "", /*exit_code*/ 0);
+
+    let combined = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert!(
+        combined.contains("Orbit"),
+        "expected Buddy history line: {combined:?}"
+    );
+    assert!(
+        combined.contains("echo done"),
+        "expected command-aware Buddy feedback: {combined:?}"
+    );
+    assert!(
+        combined.contains("Prove behavior, don't trust the diff."),
+        "expected bar-raising nudge: {combined:?}"
+    );
+}
+
+#[tokio::test]
+async fn exec_failure_with_buddy_emits_constructive_feedback() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    install_test_companion(&mut chat, "INTJ", /*muted*/ false, Some("on"));
+
+    let begin = begin_exec(&mut chat, "call-buddy-fail", "false");
+    let _ = drain_insert_history(&mut rx);
+
+    end_exec(&mut chat, begin, "", "Bloop", /*exit_code*/ 2);
+
+    let combined = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert!(
+        combined.contains("Orbit"),
+        "expected Buddy history line: {combined:?}"
+    );
+    assert!(
+        combined.contains("false exposed the constraint cleanly."),
+        "expected constructive failure lead: {combined:?}"
+    );
+    assert!(
+        combined.contains("Tighten the next attempt around the exact failing edge."),
+        "expected next-step guidance: {combined:?}"
+    );
+}
+
+#[tokio::test]
 async fn exec_end_without_begin_uses_event_command() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let command = vec![
@@ -877,6 +933,42 @@ async fn view_image_tool_call_adds_history_cell() {
 }
 
 #[tokio::test]
+async fn view_image_with_buddy_emits_visual_feedback() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    install_test_companion(&mut chat, "INTJ", /*muted*/ false, Some("on"));
+    let image_path = chat
+        .config
+        .cwd
+        .join("example.png")
+        .expect("absolute image path");
+
+    chat.handle_codex_event(Event {
+        id: "sub-image-buddy".into(),
+        msg: EventMsg::ViewImageToolCall(ViewImageToolCallEvent {
+            call_id: "call-image".into(),
+            path: image_path.to_path_buf(),
+        }),
+    });
+
+    let combined = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert!(
+        combined.contains("Orbit"),
+        "expected Buddy history line: {combined:?}"
+    );
+    assert!(
+        combined.contains("example.png"),
+        "expected path-aware Buddy feedback: {combined:?}"
+    );
+    assert!(
+        combined.contains("Check composition in context before you call it done."),
+        "expected visual verification nudge: {combined:?}"
+    );
+}
+
+#[tokio::test]
 async fn image_generation_call_adds_history_cell() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
@@ -895,6 +987,40 @@ async fn image_generation_call_adds_history_cell() {
     assert_eq!(cells.len(), 1, "expected a single history cell");
     let combined = lines_to_single_string(&cells[0]);
     assert_chatwidget_snapshot!("image_generation_call_history_snapshot", combined);
+}
+
+#[tokio::test]
+async fn image_generation_with_buddy_emits_visual_feedback() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    install_test_companion(&mut chat, "INTJ", /*muted*/ false, Some("on"));
+
+    chat.handle_codex_event(Event {
+        id: "sub-image-generation-buddy".into(),
+        msg: EventMsg::ImageGenerationEnd(ImageGenerationEndEvent {
+            call_id: "call-image-generation".into(),
+            status: "completed".into(),
+            revised_prompt: Some("A tiny blue square".into()),
+            result: "Zm9v".into(),
+            saved_path: Some("file:///tmp/ig-1.png".into()),
+        }),
+    });
+
+    let combined = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert!(
+        combined.contains("Orbit"),
+        "expected Buddy history line: {combined:?}"
+    );
+    assert!(
+        combined.contains("ig-1.png"),
+        "expected image label in Buddy feedback: {combined:?}"
+    );
+    assert!(
+        combined.contains("Judge it in context, not just as an isolated asset."),
+        "expected visual bar-raiser: {combined:?}"
+    );
 }
 
 #[tokio::test]
@@ -1500,6 +1626,185 @@ async fn apply_patch_manual_approval_adjusts_header() {
     assert!(
         blob.contains("Added foo.txt") || blob.contains("Edited foo.txt"),
         "expected apply summary header for foo.txt: {blob:?}"
+    );
+}
+
+#[tokio::test]
+async fn patch_apply_with_buddy_emits_verification_feedback() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    install_test_companion(&mut chat, "INTJ", /*muted*/ false, Some("on"));
+
+    let mut changes = HashMap::new();
+    changes.insert(
+        PathBuf::from("foo.txt"),
+        FileChange::Add {
+            content: "hello\n".to_string(),
+        },
+    );
+    chat.handle_codex_event(Event {
+        id: "patch-buddy-begin".into(),
+        msg: EventMsg::PatchApplyBegin(PatchApplyBeginEvent {
+            call_id: "call-patch".into(),
+            turn_id: "turn-call-patch".into(),
+            auto_approved: true,
+            changes: changes.clone(),
+        }),
+    });
+    let _ = drain_insert_history(&mut rx);
+
+    chat.handle_codex_event(Event {
+        id: "patch-buddy-end".into(),
+        msg: EventMsg::PatchApplyEnd(PatchApplyEndEvent {
+            call_id: "call-patch".into(),
+            turn_id: "turn-call-patch".into(),
+            stdout: "ok\n".into(),
+            stderr: String::new(),
+            success: true,
+            changes,
+            status: CorePatchApplyStatus::Completed,
+        }),
+    });
+
+    let combined = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert!(
+        combined.contains("Orbit"),
+        "expected Buddy history line: {combined:?}"
+    );
+    assert!(
+        combined.contains("1 file patch"),
+        "expected patch label in Buddy feedback: {combined:?}"
+    );
+    assert!(
+        combined.contains("Prove behavior, don't trust the diff."),
+        "expected patch verification nudge: {combined:?}"
+    );
+}
+
+#[tokio::test]
+async fn mcp_completion_with_buddy_emits_connector_feedback() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    install_test_companion(&mut chat, "INTJ", /*muted*/ false, Some("on"));
+
+    let invocation = codex_protocol::protocol::McpInvocation {
+        server: "github".to_string(),
+        tool: "search_issues".to_string(),
+        arguments: None,
+    };
+    chat.handle_codex_event(Event {
+        id: "mcp-begin".into(),
+        msg: EventMsg::McpToolCallBegin(codex_protocol::protocol::McpToolCallBeginEvent {
+            call_id: "call-mcp".into(),
+            invocation: invocation.clone(),
+        }),
+    });
+    let _ = drain_insert_history(&mut rx);
+
+    chat.handle_codex_event(Event {
+        id: "mcp-end".into(),
+        msg: EventMsg::McpToolCallEnd(codex_protocol::protocol::McpToolCallEndEvent {
+            call_id: "call-mcp".into(),
+            invocation,
+            duration: std::time::Duration::from_millis(250),
+            result: Ok(codex_protocol::mcp::CallToolResult {
+                content: vec![],
+                structured_content: None,
+                is_error: Some(false),
+                meta: None,
+            }),
+        }),
+    });
+
+    let combined = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert!(
+        combined.contains("Orbit"),
+        "expected Buddy history line: {combined:?}"
+    );
+    assert!(
+        combined.contains("github.search_issues"),
+        "expected MCP label in Buddy feedback: {combined:?}"
+    );
+    assert!(
+        combined.contains("Connector state may drift, so confirm before acting on it."),
+        "expected external-state nudge: {combined:?}"
+    );
+}
+
+#[tokio::test]
+async fn web_search_with_buddy_emits_source_quality_feedback() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    install_test_companion(&mut chat, "INTJ", /*muted*/ false, Some("on"));
+
+    chat.handle_codex_event(Event {
+        id: "web-begin".into(),
+        msg: EventMsg::WebSearchBegin(codex_protocol::protocol::WebSearchBeginEvent {
+            call_id: "call-web".into(),
+        }),
+    });
+    let _ = drain_insert_history(&mut rx);
+
+    chat.handle_codex_event(Event {
+        id: "web-end".into(),
+        msg: EventMsg::WebSearchEnd(codex_protocol::protocol::WebSearchEndEvent {
+            call_id: "call-web".into(),
+            query: "ratatui layout guide".into(),
+            action: codex_protocol::models::WebSearchAction::Search {
+                query: Some("ratatui layout guide".into()),
+                queries: None,
+            },
+        }),
+    });
+
+    let combined = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert!(
+        combined.contains("Orbit"),
+        "expected Buddy history line: {combined:?}"
+    );
+    assert!(
+        combined.contains("web search: ratatui layout guide"),
+        "expected web label in Buddy feedback: {combined:?}"
+    );
+    assert!(
+        combined.contains("Verify source quality, not just the first hit."),
+        "expected search-quality nudge: {combined:?}"
+    );
+}
+
+#[tokio::test]
+async fn approvals_remain_neutral_with_active_buddy() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    install_test_companion(&mut chat, "INTJ", /*muted*/ false, Some("on"));
+
+    chat.handle_codex_event(Event {
+        id: "approval-exec".into(),
+        msg: EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
+            call_id: "approval-1".into(),
+            approval_id: Some("approval-1".into()),
+            turn_id: "turn-approval-1".into(),
+            command: vec!["rm".into(), "-f".into(), "/tmp/file".into()],
+            cwd: PathBuf::from("/tmp"),
+            reason: Some("needs approval".into()),
+            proposed_execpolicy_amendment: None,
+            proposed_network_policy_amendments: None,
+            available_decisions: None,
+            network_approval_context: None,
+            additional_permissions: None,
+            parsed_cmd: vec![],
+        }),
+    });
+
+    let cells = drain_insert_history(&mut rx);
+    assert!(
+        cells.is_empty(),
+        "approval flow should not emit Buddy history: {cells:?}"
     );
 }
 

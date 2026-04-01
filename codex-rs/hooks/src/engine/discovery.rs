@@ -10,106 +10,152 @@ use super::config::HooksFile;
 use super::config::MatcherGroup;
 use crate::events::common::matcher_pattern_for_event;
 use crate::events::common::validate_matcher_pattern;
+use crate::registry::PluginHookSource;
 
 pub(crate) struct DiscoveryResult {
     pub handlers: Vec<ConfiguredHandler>,
     pub warnings: Vec<String>,
 }
 
-pub(crate) fn discover_handlers(config_layer_stack: Option<&ConfigLayerStack>) -> DiscoveryResult {
-    let Some(config_layer_stack) = config_layer_stack else {
-        return DiscoveryResult {
-            handlers: Vec::new(),
-            warnings: Vec::new(),
-        };
-    };
-
+pub(crate) fn discover_handlers(
+    config_layer_stack: Option<&ConfigLayerStack>,
+    plugin_hook_sources: &[PluginHookSource],
+) -> DiscoveryResult {
     let mut handlers = Vec::new();
     let mut warnings = Vec::new();
     let mut display_order = 0_i64;
 
-    for layer in config_layer_stack.get_layers(
-        ConfigLayerStackOrdering::LowestPrecedenceFirst,
-        /*include_disabled*/ false,
-    ) {
-        let Some(folder) = layer.config_folder() else {
-            continue;
-        };
-        let source_path = match folder.join("hooks.json") {
-            Ok(source_path) => source_path,
-            Err(err) => {
-                warnings.push(format!(
-                    "failed to resolve hooks config path from {}: {err}",
-                    folder.display()
-                ));
+    if let Some(config_layer_stack) = config_layer_stack {
+        for layer in config_layer_stack.get_layers(
+            ConfigLayerStackOrdering::LowestPrecedenceFirst,
+            /*include_disabled*/ false,
+        ) {
+            let Some(folder) = layer.config_folder() else {
                 continue;
-            }
-        };
-        if !source_path.as_path().is_file() {
-            continue;
-        }
-
-        let contents = match fs::read_to_string(source_path.as_path()) {
-            Ok(contents) => contents,
-            Err(err) => {
-                warnings.push(format!(
-                    "failed to read hooks config {}: {err}",
-                    source_path.display()
-                ));
-                continue;
-            }
-        };
-
-        let parsed: HooksFile = match serde_json::from_str(&contents) {
-            Ok(parsed) => parsed,
-            Err(err) => {
-                warnings.push(format!(
-                    "failed to parse hooks config {}: {err}",
-                    source_path.display()
-                ));
-                continue;
-            }
-        };
-
-        let super::config::HookEvents {
-            pre_tool_use,
-            post_tool_use,
-            session_start,
-            user_prompt_submit,
-            stop,
-        } = parsed.hooks;
-
-        for (event_name, groups) in [
-            (
-                codex_protocol::protocol::HookEventName::PreToolUse,
-                pre_tool_use,
-            ),
-            (
-                codex_protocol::protocol::HookEventName::PostToolUse,
-                post_tool_use,
-            ),
-            (
-                codex_protocol::protocol::HookEventName::SessionStart,
-                session_start,
-            ),
-            (
-                codex_protocol::protocol::HookEventName::UserPromptSubmit,
-                user_prompt_submit,
-            ),
-            (codex_protocol::protocol::HookEventName::Stop, stop),
-        ] {
-            append_matcher_groups(
+            };
+            let source_path = match folder.join("hooks.json") {
+                Ok(source_path) => source_path,
+                Err(err) => {
+                    warnings.push(format!(
+                        "failed to resolve hooks config path from {}: {err}",
+                        folder.display()
+                    ));
+                    continue;
+                }
+            };
+            append_handlers_from_hooks_file(
                 &mut handlers,
                 &mut warnings,
                 &mut display_order,
                 source_path.as_path(),
-                event_name,
-                groups,
+                Vec::new(),
             );
         }
     }
 
+    for plugin in plugin_hook_sources {
+        let env = vec![
+            (
+                "CLAUDE_PLUGIN_ROOT".to_string(),
+                plugin.plugin_root.display().to_string(),
+            ),
+            (
+                "CODEX_PLUGIN_ROOT".to_string(),
+                plugin.plugin_root.display().to_string(),
+            ),
+            (
+                "CLAUDE_PLUGIN_DATA".to_string(),
+                plugin.data_dir.display().to_string(),
+            ),
+            (
+                "CODEX_PLUGIN_DATA".to_string(),
+                plugin.data_dir.display().to_string(),
+            ),
+            ("CLAUDE_PLUGIN_NAME".to_string(), plugin.plugin_name.clone()),
+            ("CODEX_PLUGIN_NAME".to_string(), plugin.plugin_name.clone()),
+        ];
+        append_handlers_from_hooks_file(
+            &mut handlers,
+            &mut warnings,
+            &mut display_order,
+            plugin.hooks_path.as_path(),
+            env,
+        );
+    }
+
     DiscoveryResult { handlers, warnings }
+}
+
+fn append_handlers_from_hooks_file(
+    handlers: &mut Vec<ConfiguredHandler>,
+    warnings: &mut Vec<String>,
+    display_order: &mut i64,
+    source_path: &Path,
+    env: Vec<(String, String)>,
+) {
+    if !source_path.is_file() {
+        return;
+    }
+
+    let contents = match fs::read_to_string(source_path) {
+        Ok(contents) => contents,
+        Err(err) => {
+            warnings.push(format!(
+                "failed to read hooks config {}: {err}",
+                source_path.display()
+            ));
+            return;
+        }
+    };
+
+    let parsed: HooksFile = match serde_json::from_str(&contents) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            warnings.push(format!(
+                "failed to parse hooks config {}: {err}",
+                source_path.display()
+            ));
+            return;
+        }
+    };
+
+    let super::config::HookEvents {
+        pre_tool_use,
+        post_tool_use,
+        session_start,
+        user_prompt_submit,
+        stop,
+    } = parsed.hooks;
+
+    for (event_name, groups) in [
+        (
+            codex_protocol::protocol::HookEventName::PreToolUse,
+            pre_tool_use,
+        ),
+        (
+            codex_protocol::protocol::HookEventName::PostToolUse,
+            post_tool_use,
+        ),
+        (
+            codex_protocol::protocol::HookEventName::SessionStart,
+            session_start,
+        ),
+        (
+            codex_protocol::protocol::HookEventName::UserPromptSubmit,
+            user_prompt_submit,
+        ),
+        (codex_protocol::protocol::HookEventName::Stop, stop),
+    ] {
+        append_matcher_groups(
+            handlers,
+            warnings,
+            display_order,
+            source_path,
+            event_name,
+            groups,
+            &env,
+        );
+    }
 }
 
 fn append_group_handlers(
@@ -120,6 +166,7 @@ fn append_group_handlers(
     event_name: codex_protocol::protocol::HookEventName,
     matcher: Option<&str>,
     group_handlers: Vec<HookHandlerConfig>,
+    env: &[(String, String)],
 ) {
     if let Some(matcher) = matcher
         && let Err(err) = validate_matcher_pattern(matcher)
@@ -162,6 +209,7 @@ fn append_group_handlers(
                     status_message,
                     source_path: source_path.to_path_buf(),
                     display_order: *display_order,
+                    env: env.to_vec(),
                 });
                 *display_order += 1;
             }
@@ -184,6 +232,7 @@ fn append_matcher_groups(
     source_path: &Path,
     event_name: codex_protocol::protocol::HookEventName,
     groups: Vec<MatcherGroup>,
+    env: &[(String, String)],
 ) {
     for group in groups {
         append_group_handlers(
@@ -194,6 +243,7 @@ fn append_matcher_groups(
             event_name,
             matcher_pattern_for_event(event_name, group.matcher.as_deref()),
             group.hooks,
+            env,
         );
     }
 }
@@ -230,6 +280,7 @@ mod tests {
                 r#async: false,
                 status_message: None,
             }],
+            &[],
         );
 
         assert_eq!(warnings, Vec::<String>::new());
@@ -243,6 +294,7 @@ mod tests {
                 status_message: None,
                 source_path: PathBuf::from("/tmp/hooks.json"),
                 display_order: 0,
+                env: Vec::new(),
             }]
         );
     }
@@ -266,6 +318,7 @@ mod tests {
                 r#async: false,
                 status_message: None,
             }],
+            &[],
         );
 
         assert_eq!(warnings, Vec::<String>::new());
@@ -279,6 +332,7 @@ mod tests {
                 status_message: None,
                 source_path: PathBuf::from("/tmp/hooks.json"),
                 display_order: 0,
+                env: Vec::new(),
             }]
         );
     }
@@ -302,6 +356,7 @@ mod tests {
                 r#async: false,
                 status_message: None,
             }],
+            &[],
         );
 
         assert_eq!(warnings, Vec::<String>::new());
@@ -328,6 +383,7 @@ mod tests {
                 r#async: false,
                 status_message: None,
             }],
+            &[],
         );
 
         assert_eq!(warnings, Vec::<String>::new());

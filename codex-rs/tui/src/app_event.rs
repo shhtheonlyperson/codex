@@ -69,6 +69,11 @@ pub(crate) enum WindowsSandboxEnableMode {
     Legacy,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CompanionAction {
+    RunBuddyCommand { args: Vec<String> },
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) struct ConnectorsSnapshot {
@@ -501,6 +506,9 @@ pub(crate) enum AppEvent {
 
     /// Open the custom prompt option from the review popup.
     OpenReviewCustomPrompt,
+
+    /// Run a host-side companion control action.
+    CompanionAction(CompanionAction),
 
     /// Submit a user message with an explicit collaboration mask.
     SubmitUserMessageWithMode {

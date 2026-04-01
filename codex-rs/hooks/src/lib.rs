@@ -20,6 +20,7 @@ pub use legacy_notify::legacy_notify_json;
 pub use legacy_notify::notify_hook;
 pub use registry::Hooks;
 pub use registry::HooksConfig;
+pub use registry::PluginHookSource;
 pub use registry::command_from_argv;
 pub use schema::write_schema_fixtures;
 pub use types::Hook;

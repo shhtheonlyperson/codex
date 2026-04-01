@@ -1,6 +1,50 @@
 use super::*;
 use pretty_assertions::assert_eq;
 
+fn test_companion_profile(
+    type_code: &str,
+    muted: bool,
+    format_mode: CompanionHeadersAndListsMode,
+) -> CompanionProfile {
+    let state = CompanionState {
+        type_code: type_code.to_string(),
+        name: "Orbit".to_string(),
+        muted,
+        teaser_dismissed: true,
+        axes: None,
+        format_preferences: CompanionFormatPreferences {
+            headers_and_lists: Some(format_mode.as_str().to_string()),
+        },
+        persona_version: Some(2),
+    };
+    let entry = CompanionTypeEntry {
+        code: type_code.to_string(),
+        display_name: "Test Persona".to_string(),
+        default_name: "Orbit".to_string(),
+        summary: "Test summary".to_string(),
+        reaction_style: "playful".to_string(),
+        starter_quips: vec!["Buddy is taking point.".to_string()],
+        observer_quips: vec!["Buddy wrapped the turn.".to_string()],
+        visual: CompanionVisual {
+            species: "otter".to_string(),
+            face: "(^_^)/".to_string(),
+            hat: "visor".to_string(),
+            motif: "constellations".to_string(),
+        },
+    };
+    let axes = state.normalized_axes();
+    CompanionProfile {
+        state,
+        entry,
+        persona_version: 2,
+        axes,
+        format_mode,
+        style_labels: companion_style_labels(axes),
+        characteristics: companion_characteristics(axes, format_mode),
+        trait_scores: CompanionTraitScores::from_axes(axes),
+    }
+}
+
 /// Receiving a TokenCount event without usage clears the context indicator.
 #[tokio::test]
 async fn token_count_none_resets_context_indicator() {
@@ -165,6 +209,52 @@ async fn worked_elapsed_from_resets_when_timer_restarts() {
     // Simulate status timer resetting (e.g., status indicator recreated for a new task).
     assert_eq!(chat.worked_elapsed_from(/*current_elapsed*/ 3), 3);
     assert_eq!(chat.worked_elapsed_from(/*current_elapsed*/ 7), 4);
+}
+
+#[test]
+fn companion_mbti_derivations_are_deterministic() {
+    let intj = CompanionAxesNormalized::from_type_code("INTJ");
+    assert_eq!(companion_style_labels(intj), vec!["professional", "candid"]);
+
+    let traits = CompanionTraitScores::from_axes(intj);
+    assert_eq!(traits.debugging, 82);
+    assert_eq!(traits.patience, 62);
+    assert_eq!(traits.chaos, 40);
+    assert_eq!(traits.wisdom, 78);
+    assert_eq!(traits.snark, 60);
+
+    let judge_auto = companion_characteristics(intj, CompanionHeadersAndListsMode::Auto);
+    assert!(judge_auto.headers_and_lists_effective);
+
+    let enfp = CompanionAxesNormalized::from_type_code("ENFP");
+    let perceive_auto = companion_characteristics(enfp, CompanionHeadersAndListsMode::Auto);
+    assert!(!perceive_auto.headers_and_lists_effective);
+    assert!(perceive_auto.warm);
+    assert!(perceive_auto.enthusiastic);
+}
+
+#[tokio::test]
+async fn default_working_status_uses_buddy_when_active_and_neutral_when_muted() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.set_default_working_status();
+    assert_eq!(chat.current_status.header, "Working");
+
+    chat.companion_profile_cache = Some(test_companion_profile(
+        "INTJ",
+        /*muted*/ false,
+        CompanionHeadersAndListsMode::On,
+    ));
+    chat.set_default_working_status();
+    assert_eq!(chat.current_status.header, "Buddy is taking point.");
+
+    chat.companion_profile_cache = Some(test_companion_profile(
+        "INTJ",
+        /*muted*/ true,
+        CompanionHeadersAndListsMode::On,
+    ));
+    chat.set_default_working_status();
+    assert_eq!(chat.current_status.header, "Working");
 }
 
 #[tokio::test]
@@ -1281,6 +1371,7 @@ async fn user_prompt_submit_app_server_hook_notifications_render_snapshot() {
                 completed_at: None,
                 duration_ms: None,
                 entries: Vec::new(),
+                plugin_ui_events: Vec::new(),
             },
         }),
         /*replay_kind*/ None,
@@ -1312,6 +1403,7 @@ async fn user_prompt_submit_app_server_hook_notifications_render_snapshot() {
                         text: "prompt blocked".to_string(),
                     },
                 ],
+                plugin_ui_events: Vec::new(),
             },
         }),
         /*replay_kind*/ None,

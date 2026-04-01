@@ -20,6 +20,7 @@ use crate::events::stop::StopOutcome;
 use crate::events::stop::StopRequest;
 use crate::events::user_prompt_submit::UserPromptSubmitOutcome;
 use crate::events::user_prompt_submit::UserPromptSubmitRequest;
+use crate::registry::PluginHookSource;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CommandShell {
@@ -36,6 +37,7 @@ pub(crate) struct ConfiguredHandler {
     pub status_message: Option<String>,
     pub source_path: PathBuf,
     pub display_order: i64,
+    pub env: Vec<(String, String)>,
 }
 
 impl ConfiguredHandler {
@@ -70,6 +72,7 @@ impl ClaudeHooksEngine {
     pub(crate) fn new(
         enabled: bool,
         config_layer_stack: Option<&ConfigLayerStack>,
+        plugin_hook_sources: &[PluginHookSource],
         shell: CommandShell,
     ) -> Self {
         if !enabled {
@@ -92,7 +95,7 @@ impl ClaudeHooksEngine {
         }
 
         let _ = schema_loader::generated_hook_schemas();
-        let discovered = discovery::discover_handlers(config_layer_stack);
+        let discovered = discovery::discover_handlers(config_layer_stack, plugin_hook_sources);
         Self {
             handlers: discovered.handlers,
             warnings: discovered.warnings,

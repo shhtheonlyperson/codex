@@ -10,6 +10,7 @@ pub(crate) struct UniversalOutput {
 pub(crate) struct SessionStartOutput {
     pub universal: UniversalOutput,
     pub additional_context: Option<String>,
+    pub plugin_ui_events: Vec<codex_protocol::protocol::PluginUiEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -17,6 +18,7 @@ pub(crate) struct PreToolUseOutput {
     pub universal: UniversalOutput,
     pub block_reason: Option<String>,
     pub invalid_reason: Option<String>,
+    pub plugin_ui_events: Vec<codex_protocol::protocol::PluginUiEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -27,6 +29,7 @@ pub(crate) struct PostToolUseOutput {
     pub invalid_block_reason: Option<String>,
     pub additional_context: Option<String>,
     pub invalid_reason: Option<String>,
+    pub plugin_ui_events: Vec<codex_protocol::protocol::PluginUiEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +39,7 @@ pub(crate) struct UserPromptSubmitOutput {
     pub reason: Option<String>,
     pub invalid_block_reason: Option<String>,
     pub additional_context: Option<String>,
+    pub plugin_ui_events: Vec<codex_protocol::protocol::PluginUiEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,10 +48,13 @@ pub(crate) struct StopOutput {
     pub should_block: bool,
     pub reason: Option<String>,
     pub invalid_block_reason: Option<String>,
+    pub plugin_ui_events: Vec<codex_protocol::protocol::PluginUiEvent>,
 }
 
 use crate::schema::BlockDecisionWire;
 use crate::schema::HookUniversalOutputWire;
+use crate::schema::PluginUiAnimationWire;
+use crate::schema::PluginUiEventWire;
 use crate::schema::PostToolUseCommandOutputWire;
 use crate::schema::PreToolUseCommandOutputWire;
 use crate::schema::PreToolUseDecisionWire;
@@ -64,6 +71,11 @@ pub(crate) fn parse_session_start(stdout: &str) -> Option<SessionStartOutput> {
     Some(SessionStartOutput {
         universal: UniversalOutput::from(wire.universal),
         additional_context,
+        plugin_ui_events: wire
+            .plugin_ui_events
+            .into_iter()
+            .map(plugin_ui_event_from_wire)
+            .collect(),
     })
 }
 
@@ -73,6 +85,7 @@ pub(crate) fn parse_pre_tool_use(stdout: &str) -> Option<PreToolUseOutput> {
         decision,
         reason,
         hook_specific_output,
+        plugin_ui_events,
     } = parse_json(stdout)?;
     let universal = UniversalOutput::from(universal_wire);
     let hook_specific_output = hook_specific_output.as_ref();
@@ -112,6 +125,7 @@ pub(crate) fn parse_pre_tool_use(stdout: &str) -> Option<PreToolUseOutput> {
         universal,
         block_reason,
         invalid_reason,
+        plugin_ui_events: hook_wire_plugin_ui_events(&hook_specific_output, plugin_ui_events),
     })
 }
 
@@ -146,6 +160,11 @@ pub(crate) fn parse_post_tool_use(stdout: &str) -> Option<PostToolUseOutput> {
         invalid_block_reason,
         additional_context,
         invalid_reason,
+        plugin_ui_events: wire
+            .plugin_ui_events
+            .into_iter()
+            .map(plugin_ui_event_from_wire)
+            .collect(),
     })
 }
 
@@ -170,6 +189,11 @@ pub(crate) fn parse_user_prompt_submit(stdout: &str) -> Option<UserPromptSubmitO
         reason: wire.reason,
         invalid_block_reason,
         additional_context,
+        plugin_ui_events: wire
+            .plugin_ui_events
+            .into_iter()
+            .map(plugin_ui_event_from_wire)
+            .collect(),
     })
 }
 
@@ -190,6 +214,11 @@ pub(crate) fn parse_stop(stdout: &str) -> Option<StopOutput> {
         should_block: should_block && invalid_block_reason.is_none(),
         reason: wire.reason,
         invalid_block_reason,
+        plugin_ui_events: wire
+            .plugin_ui_events
+            .into_iter()
+            .map(plugin_ui_event_from_wire)
+            .collect(),
     })
 }
 
@@ -201,6 +230,73 @@ impl From<HookUniversalOutputWire> for UniversalOutput {
             suppress_output: value.suppress_output,
             system_message: value.system_message,
         }
+    }
+}
+
+fn hook_wire_plugin_ui_events<T>(
+    _hook_specific_output: &Option<T>,
+    plugin_ui_events: Vec<PluginUiEventWire>,
+) -> Vec<codex_protocol::protocol::PluginUiEvent> {
+    plugin_ui_events
+        .into_iter()
+        .map(plugin_ui_event_from_wire)
+        .collect()
+}
+
+fn plugin_ui_event_from_wire(value: PluginUiEventWire) -> codex_protocol::protocol::PluginUiEvent {
+    match value {
+        PluginUiEventWire::Presence {
+            plugin,
+            visible,
+            muted,
+            label,
+            subtitle,
+            badge,
+            face,
+            color,
+            species,
+            reserved_columns,
+            animation,
+        } => codex_protocol::protocol::PluginUiEvent::Presence {
+            plugin,
+            visible,
+            muted,
+            label,
+            subtitle,
+            badge,
+            face,
+            color,
+            species,
+            reserved_columns,
+            animation: animation.map(plugin_ui_animation_from_wire),
+        },
+        PluginUiEventWire::Reaction {
+            plugin,
+            text,
+            kind,
+            ttl_ms,
+        } => codex_protocol::protocol::PluginUiEvent::Reaction {
+            plugin,
+            text,
+            kind,
+            ttl_ms,
+        },
+        PluginUiEventWire::Pet { plugin, ttl_ms } => {
+            codex_protocol::protocol::PluginUiEvent::Pet { plugin, ttl_ms }
+        }
+    }
+}
+
+fn plugin_ui_animation_from_wire(
+    value: PluginUiAnimationWire,
+) -> codex_protocol::protocol::PluginUiAnimation {
+    codex_protocol::protocol::PluginUiAnimation {
+        idle_frames: value.idle_frames,
+        reaction_frames: value.reaction_frames,
+        pet_frames: value.pet_frames,
+        idle_frame_ms: value.idle_frame_ms,
+        reaction_frame_ms: value.reaction_frame_ms,
+        pet_frame_ms: value.pet_frame_ms,
     }
 }
 

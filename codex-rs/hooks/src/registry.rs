@@ -17,12 +17,22 @@ use crate::types::Hook;
 use crate::types::HookEvent;
 use crate::types::HookPayload;
 use crate::types::HookResponse;
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginHookSource {
+    pub plugin_name: String,
+    pub plugin_root: PathBuf,
+    pub data_dir: PathBuf,
+    pub hooks_path: PathBuf,
+}
 
 #[derive(Default, Clone)]
 pub struct HooksConfig {
     pub legacy_notify_argv: Option<Vec<String>>,
     pub feature_enabled: bool,
     pub config_layer_stack: Option<ConfigLayerStack>,
+    pub plugin_hook_sources: Vec<PluginHookSource>,
     pub shell_program: Option<String>,
     pub shell_args: Vec<String>,
 }
@@ -51,6 +61,7 @@ impl Hooks {
         let engine = ClaudeHooksEngine::new(
             config.feature_enabled,
             config.config_layer_stack.as_ref(),
+            &config.plugin_hook_sources,
             CommandShell {
                 program: config.shell_program.unwrap_or_default(),
                 args: config.shell_args,

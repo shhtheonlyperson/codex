@@ -32,12 +32,15 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
+use chrono::Datelike;
+use chrono::Local;
 use url::Url;
 
 use self::realtime::PendingSteerCompareKey;
@@ -234,8 +237,10 @@ use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
+use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
+use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::debug;
 use tracing::warn;
@@ -254,6 +259,779 @@ const PLAN_MODE_REASONING_SCOPE_PLAN_ONLY: &str = "Apply to Plan mode override";
 const PLAN_MODE_REASONING_SCOPE_ALL_MODES: &str = "Apply to global default and Plan mode override";
 const CONNECTORS_SELECTION_VIEW_ID: &str = "connectors-selection";
 const TUI_STUB_MESSAGE: &str = "Not available in TUI yet.";
+const COMPANION_PLUGIN_NAME: &str = "companion";
+const COMPANION_MANAGER_SCRIPT_REL: &str = "scripts/manage_companion.py";
+const COMPANION_STATE_FILE: &str = "profile.json";
+const COMPANION_REGISTRY_FILE: &str = "data/type-registry.json";
+const BUDDY_COMMAND_NAME: &str = "buddy";
+const COMPANION_WAIT_INITIAL_SECS: u64 = 8;
+const COMPANION_WAIT_REPEAT_SECS: u64 = 15;
+
+#[derive(Debug, Clone)]
+struct CompanionPluginContext {
+    root: PathBuf,
+    data_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CompanionState {
+    #[serde(rename = "typeCode")]
+    type_code: String,
+    name: String,
+    #[serde(default)]
+    axes: Option<CompanionAxes>,
+    #[serde(rename = "formatPreferences", default)]
+    format_preferences: CompanionFormatPreferences,
+    #[serde(rename = "personaVersion", default)]
+    persona_version: Option<u32>,
+    #[serde(default)]
+    muted: bool,
+    #[serde(rename = "teaserDismissed", default)]
+    teaser_dismissed: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct CompanionAxes {
+    attitude: Option<String>,
+    observation: Option<String>,
+    decision: Option<String>,
+    lifestyle: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct CompanionFormatPreferences {
+    #[serde(rename = "headersAndLists", default)]
+    headers_and_lists: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CompanionRegistry {
+    #[serde(rename = "personaVersion", default)]
+    persona_version: Option<u32>,
+    types: Vec<CompanionTypeEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CompanionTypeEntry {
+    code: String,
+    #[serde(rename = "displayName")]
+    display_name: String,
+    #[serde(rename = "defaultName")]
+    default_name: String,
+    summary: String,
+    #[serde(rename = "reactionStyle")]
+    reaction_style: String,
+    #[serde(rename = "starterQuips", default)]
+    starter_quips: Vec<String>,
+    #[serde(rename = "observerQuips", default)]
+    observer_quips: Vec<String>,
+    visual: CompanionVisual,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CompanionVisual {
+    species: String,
+    face: String,
+    hat: String,
+    motif: String,
+}
+
+#[derive(Debug, Clone)]
+struct CompanionProfile {
+    state: CompanionState,
+    entry: CompanionTypeEntry,
+    persona_version: u32,
+    axes: CompanionAxesNormalized,
+    format_mode: CompanionHeadersAndListsMode,
+    style_labels: Vec<&'static str>,
+    characteristics: CompanionCharacteristics,
+    trait_scores: CompanionTraitScores,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompanionHeadersAndListsMode {
+    Auto,
+    On,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompanionAxesNormalized {
+    attitude: char,
+    observation: char,
+    decision: char,
+    lifestyle: char,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CompanionCharacteristics {
+    warm: bool,
+    enthusiastic: bool,
+    headers_and_lists_effective: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CompanionTraitScores {
+    debugging: u8,
+    patience: u8,
+    chaos: u8,
+    wisdom: u8,
+    snark: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompanionToolFamily {
+    Exec,
+    Mcp,
+    Web,
+    Patch,
+    Image,
+    ViewImage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompanionToolOutcome {
+    Started,
+    Waiting,
+    Success,
+    Failure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompanionToolRisk {
+    ReadOnly,
+    Mutating,
+    External,
+    Visual,
+}
+
+#[derive(Debug, Clone)]
+struct CompanionToolFeedbackContext {
+    family: CompanionToolFamily,
+    outcome: CompanionToolOutcome,
+    risk: CompanionToolRisk,
+    label: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompanionNarrationKind {
+    TaskStart,
+    Reasoning,
+    HookStart,
+    HookFinish,
+    PlanProgress,
+    TaskComplete,
+}
+
+#[derive(Debug, Default)]
+struct CompanionNarrationState {
+    last_line: Option<String>,
+    last_kind: Option<CompanionNarrationKind>,
+    active_reasoning_header: Option<String>,
+    tool_streak_announced: bool,
+    wait_state: Option<CompanionWaitNarrationState>,
+}
+
+#[derive(Debug)]
+struct CompanionWaitNarrationState {
+    process_id: String,
+    command_display: Option<String>,
+    started_at: Instant,
+    escalations_emitted: usize,
+}
+
+#[derive(Debug)]
+struct CompanionTextPanel {
+    lines: Vec<Line<'static>>,
+}
+
+impl Renderable for CompanionTextPanel {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        Paragraph::new(self.lines.clone())
+            .wrap(Wrap { trim: false })
+            .render(area, buf);
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        Paragraph::new(self.lines.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(width)
+            .try_into()
+            .unwrap_or(0)
+    }
+}
+
+impl CompanionState {
+    fn normalized_axes(&self) -> CompanionAxesNormalized {
+        let fallback = CompanionAxesNormalized::from_type_code(&self.type_code);
+        let Some(axes) = self.axes.as_ref() else {
+            return fallback;
+        };
+        CompanionAxesNormalized {
+            attitude: normalize_companion_axis_value(axes.attitude.as_deref(), 'E', 'I')
+                .unwrap_or(fallback.attitude),
+            observation: normalize_companion_axis_value(axes.observation.as_deref(), 'S', 'N')
+                .unwrap_or(fallback.observation),
+            decision: normalize_companion_axis_value(axes.decision.as_deref(), 'T', 'F')
+                .unwrap_or(fallback.decision),
+            lifestyle: normalize_companion_axis_value(axes.lifestyle.as_deref(), 'J', 'P')
+                .unwrap_or(fallback.lifestyle),
+        }
+    }
+}
+
+impl CompanionHeadersAndListsMode {
+    fn from_state(state: &CompanionState) -> Self {
+        match state
+            .format_preferences
+            .headers_and_lists
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("on") => Self::On,
+            Some("off") => Self::Off,
+            _ => Self::Auto,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
+impl CompanionAxesNormalized {
+    fn from_type_code(type_code: &str) -> Self {
+        let chars = type_code
+            .chars()
+            .map(|ch| ch.to_ascii_uppercase())
+            .collect::<Vec<_>>();
+        let get = |idx: usize, yes: char, no: char| -> char {
+            chars
+                .get(idx)
+                .copied()
+                .filter(|ch| *ch == yes || *ch == no)
+                .unwrap_or(yes)
+        };
+        Self {
+            attitude: get(0, 'E', 'I'),
+            observation: get(1, 'S', 'N'),
+            decision: get(2, 'T', 'F'),
+            lifestyle: get(3, 'J', 'P'),
+        }
+    }
+
+    fn axis_label(self, axis_name: &str) -> &'static str {
+        match axis_name {
+            "attitude" => {
+                if self.attitude == 'E' {
+                    "Extraversion"
+                } else {
+                    "Introversion"
+                }
+            }
+            "observation" => {
+                if self.observation == 'S' {
+                    "Sensing"
+                } else {
+                    "Intuition"
+                }
+            }
+            "decision" => {
+                if self.decision == 'T' {
+                    "Thinking"
+                } else {
+                    "Feeling"
+                }
+            }
+            "lifestyle" => {
+                if self.lifestyle == 'J' {
+                    "Judging"
+                } else {
+                    "Perceiving"
+                }
+            }
+            _ => "Unknown",
+        }
+    }
+}
+
+impl CompanionTraitScores {
+    fn from_axes(axes: CompanionAxesNormalized) -> Self {
+        Self {
+            debugging: companion_trait_score(50, axes, [8, -4], [8, 2], [12, -8], [10, -10]),
+            patience: companion_trait_score(50, axes, [10, -8], [6, 0], [-6, 8], [8, -10]),
+            chaos: companion_trait_score(50, axes, [-6, 8], [-6, 8], [2, 0], [-14, 14]),
+            wisdom: companion_trait_score(50, axes, [10, -4], [-8, 12], [0, 6], [6, -4]),
+            snark: companion_trait_score(50, axes, [-2, 6], [0, 4], [14, -12], [-6, 10]),
+        }
+    }
+
+    fn lines(self) -> [(&'static str, u8); 5] {
+        [
+            ("DEBUGGING", self.debugging),
+            ("PATIENCE", self.patience),
+            ("CHAOS", self.chaos),
+            ("WISDOM", self.wisdom),
+            ("SNARK", self.snark),
+        ]
+    }
+
+    fn dominant_trait(self, allow_snark: bool) -> &'static str {
+        let mut best = ("DEBUGGING", self.debugging);
+        for candidate in self.lines() {
+            if !allow_snark && candidate.0 == "SNARK" {
+                continue;
+            }
+            if candidate.1 > best.1 {
+                best = candidate;
+            }
+        }
+        best.0
+    }
+}
+
+impl CompanionProfile {
+    fn headers_and_lists_effective(&self) -> bool {
+        self.characteristics.headers_and_lists_effective
+    }
+
+    fn format_mode_label(&self) -> &'static str {
+        self.format_mode.as_str()
+    }
+
+    fn buddy_prefix_line(&self) -> Line<'static> {
+        Line::from(vec![
+            Span::styled(
+                format!("{}  {}", self.entry.visual.face, self.state.name),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(
+                "  [{} - {}]",
+                self.state.type_code, self.entry.display_name
+            )),
+        ])
+    }
+}
+
+fn normalize_companion_axis_value(value: Option<&str>, yes: char, no: char) -> Option<char> {
+    let candidate = value?.trim().chars().next()?.to_ascii_uppercase();
+    (candidate == yes || candidate == no).then_some(candidate)
+}
+
+fn companion_trait_score(
+    base: i32,
+    axes: CompanionAxesNormalized,
+    attitude: [i32; 2],
+    observation: [i32; 2],
+    decision: [i32; 2],
+    lifestyle: [i32; 2],
+) -> u8 {
+    let score =
+        base + if axes.attitude == 'I' {
+            attitude[0]
+        } else {
+            attitude[1]
+        } + if axes.observation == 'S' {
+            observation[0]
+        } else {
+            observation[1]
+        } + if axes.decision == 'T' {
+            decision[0]
+        } else {
+            decision[1]
+        } + if axes.lifestyle == 'J' {
+            lifestyle[0]
+        } else {
+            lifestyle[1]
+        };
+    score.clamp(0, 100) as u8
+}
+
+fn companion_style_labels(axes: CompanionAxesNormalized) -> Vec<&'static str> {
+    let mut scored = vec![
+        (
+            "professional",
+            i32::from(axes.decision == 'T') + i32::from(axes.lifestyle == 'J'),
+            0,
+        ),
+        (
+            "efficient",
+            i32::from(axes.observation == 'S') + i32::from(axes.lifestyle == 'J'),
+            1,
+        ),
+        (
+            "friendly",
+            i32::from(axes.attitude == 'E') + i32::from(axes.decision == 'F'),
+            2,
+        ),
+        (
+            "candid",
+            i32::from(axes.attitude == 'I') + i32::from(axes.decision == 'T'),
+            3,
+        ),
+        (
+            "quirky",
+            i32::from(axes.observation == 'N') + i32::from(axes.lifestyle == 'P'),
+            4,
+        ),
+        (
+            "cynical",
+            i32::from(axes.decision == 'T') + i32::from(axes.lifestyle == 'P'),
+            5,
+        ),
+    ];
+    scored.sort_by_key(|(_, score, priority)| (-*score, *priority));
+    scored
+        .into_iter()
+        .take(2)
+        .map(|(label, _, _)| label)
+        .collect()
+}
+
+fn companion_characteristics(
+    axes: CompanionAxesNormalized,
+    format_mode: CompanionHeadersAndListsMode,
+) -> CompanionCharacteristics {
+    CompanionCharacteristics {
+        warm: axes.decision == 'F',
+        enthusiastic: axes.attitude == 'E',
+        headers_and_lists_effective: match format_mode {
+            CompanionHeadersAndListsMode::On => true,
+            CompanionHeadersAndListsMode::Off => false,
+            CompanionHeadersAndListsMode::Auto => axes.lifestyle == 'J',
+        },
+    }
+}
+
+fn companion_narration_text(profile: &CompanionProfile, kind: CompanionNarrationKind) -> String {
+    let dominant = profile.trait_scores.dominant_trait(true);
+    match kind {
+        CompanionNarrationKind::TaskStart => profile
+            .entry
+            .starter_quips
+            .first()
+            .cloned()
+            .unwrap_or_else(|| match dominant {
+                "DEBUGGING" => "Mapping the structure before we move.".to_string(),
+                "PATIENCE" => "Settling in. We can take the clean path.".to_string(),
+                "CHAOS" => "All right, let's test the lively version.".to_string(),
+                "WISDOM" => "Choosing the long-view route first.".to_string(),
+                "SNARK" => "Fine. Let's make the mess explain itself.".to_string(),
+                _ => "Working through the next move.".to_string(),
+            }),
+        CompanionNarrationKind::Reasoning => match dominant {
+            "DEBUGGING" => "The shape is clearer now.".to_string(),
+            "PATIENCE" => "Steady. The thread is holding.".to_string(),
+            "CHAOS" => "There is a smarter angle in motion.".to_string(),
+            "WISDOM" => "The long-view pattern is surfacing.".to_string(),
+            "SNARK" => "Interesting. The real problem finally introduced itself.".to_string(),
+            _ => "The thread is taking shape.".to_string(),
+        },
+        CompanionNarrationKind::HookStart => "Quick hook pass underway.".to_string(),
+        CompanionNarrationKind::HookFinish => "Hook pass settled.".to_string(),
+        CompanionNarrationKind::PlanProgress => "The checklist shape is holding.".to_string(),
+        CompanionNarrationKind::TaskComplete => profile
+            .entry
+            .observer_quips
+            .first()
+            .cloned()
+            .unwrap_or_else(|| match dominant {
+                "DEBUGGING" => "The turn closed with a cleaner map.".to_string(),
+                "PATIENCE" => "Good. That landed steadily.".to_string(),
+                "CHAOS" => "Nice. The energy turned usable.".to_string(),
+                "WISDOM" => "That finished in a shape worth keeping.".to_string(),
+                "SNARK" => "Well. That resolved more gracefully than expected.".to_string(),
+                _ => "Turn complete.".to_string(),
+            }),
+    }
+}
+
+fn companion_wait_history_text(profile: &CompanionProfile, escalation: usize) -> String {
+    let dominant = profile.trait_scores.dominant_trait(/*allow_snark*/ true);
+    if escalation <= 1 {
+        return match dominant {
+            "DEBUGGING" => "Still waiting. The slow edge is revealing itself.".to_string(),
+            "PATIENCE" => "Still waiting. Steady progress is still progress.".to_string(),
+            "CHAOS" => "Still waiting. The interesting part is taking its time.".to_string(),
+            "WISDOM" => "Still waiting. The long-view route is still intact.".to_string(),
+            "SNARK" => "Still waiting. The suspense is apparently mandatory.".to_string(),
+            _ => "Still waiting. The process is still in motion.".to_string(),
+        };
+    }
+    match dominant {
+        "DEBUGGING" => "Long wait noted. I am keeping the structure tidy around it.".to_string(),
+        "PATIENCE" => "Long wait noted. We can hold steady a little longer.".to_string(),
+        "CHAOS" => "Long wait noted. The noisy route is still doing its thing.".to_string(),
+        "WISDOM" => "Long wait noted. The strategic route is still worth it.".to_string(),
+        "SNARK" => "Long wait noted. The terminal does love a monologue.".to_string(),
+        _ => "Long wait noted. I am still tracking it.".to_string(),
+    }
+}
+
+fn companion_tool_label(label: &str) -> String {
+    crate::text_formatting::truncate_text(label.trim(), /*max_graphemes*/ 56)
+}
+
+fn companion_tool_status_text(
+    profile: &CompanionProfile,
+    context: &CompanionToolFeedbackContext,
+) -> String {
+    let label = companion_tool_label(&context.label);
+    let dominant = profile
+        .trait_scores
+        .dominant_trait(!matches!(context.outcome, CompanionToolOutcome::Failure));
+    match context.outcome {
+        CompanionToolOutcome::Started => match context.family {
+            CompanionToolFamily::Exec => match context.risk {
+                CompanionToolRisk::ReadOnly => match dominant {
+                    "DEBUGGING" => format!("Reading through {label} carefully."),
+                    "PATIENCE" => format!("Steady pass through {label}."),
+                    "CHAOS" => format!("Shaking a clue loose from {label}."),
+                    "WISDOM" => format!("Pulling signal from {label} first."),
+                    "SNARK" => format!("Let's see whether {label} knows anything useful."),
+                    _ => format!("Checking {label}."),
+                },
+                _ => match dominant {
+                    "DEBUGGING" => format!("Running {label}, then we prove behavior."),
+                    "PATIENCE" => format!("Applying {label} carefully."),
+                    "CHAOS" => format!("Kicking {label} and watching the edges."),
+                    "WISDOM" => format!("Using {label}, but the diff is not proof."),
+                    "SNARK" => format!("Running {label}. Optimism remains unearned."),
+                    _ => format!("Running {label}."),
+                },
+            },
+            CompanionToolFamily::Mcp => match dominant {
+                "DEBUGGING" => format!("Checking {label} for real signal."),
+                "PATIENCE" => format!("Consulting {label} carefully."),
+                "CHAOS" => format!("Poking {label} for something useful."),
+                "WISDOM" => format!("Pulling external state from {label}."),
+                "SNARK" => format!("Asking {label}. External systems love surprises."),
+                _ => format!("Calling {label}."),
+            },
+            CompanionToolFamily::Web => match dominant {
+                "DEBUGGING" => format!("Searching {label}, not trusting the first hit."),
+                "PATIENCE" => format!("Gathering web signal from {label}."),
+                "CHAOS" => format!("Casting a wider net through {label}."),
+                "WISDOM" => format!("Checking outside signal from {label}."),
+                "SNARK" => format!("Searching {label}. The internet will surely be normal."),
+                _ => format!("Searching {label}."),
+            },
+            CompanionToolFamily::Patch => match dominant {
+                "DEBUGGING" => format!("Landing {label}. We verify after."),
+                "PATIENCE" => format!("Applying {label} carefully."),
+                "CHAOS" => format!("Dropping in {label} and watching the fallout."),
+                "WISDOM" => format!("Applying {label}, but behavior decides."),
+                "SNARK" => format!("Applying {label}. The diff had better earn it."),
+                _ => format!("Applying {label}."),
+            },
+            CompanionToolFamily::Image => match dominant {
+                "DEBUGGING" => format!("Generating {label} for a visual pass."),
+                "PATIENCE" => format!("Building {label} carefully."),
+                "CHAOS" => format!("Cooking up {label}."),
+                "WISDOM" => format!("Generating {label}, then checking context."),
+                "SNARK" => format!("Generating {label}. Art with accountability."),
+                _ => format!("Generating {label}."),
+            },
+            CompanionToolFamily::ViewImage => match dominant {
+                "DEBUGGING" => format!("Inspecting {label} in context."),
+                "PATIENCE" => format!("Taking a careful look at {label}."),
+                "CHAOS" => format!("Zooming in on {label}."),
+                "WISDOM" => format!("Checking {label} before we judge it."),
+                "SNARK" => format!("Looking at {label}. Pixels, please cooperate."),
+                _ => format!("Viewing {label}."),
+            },
+        },
+        CompanionToolOutcome::Waiting => match dominant {
+            "DEBUGGING" => format!("Still on {label}. Slow edges tell the truth."),
+            "PATIENCE" => format!("Still on {label}. Let it settle."),
+            "CHAOS" => format!("Still on {label}. The noisy bit is taking its time."),
+            "WISDOM" => format!("Still on {label}. Long turns can still pay off."),
+            "SNARK" => format!("Still on {label}. Apparently suspense was required."),
+            _ => format!("Still on {label}."),
+        },
+        CompanionToolOutcome::Success | CompanionToolOutcome::Failure => label,
+    }
+}
+
+fn companion_tool_history_text(
+    profile: &CompanionProfile,
+    context: &CompanionToolFeedbackContext,
+) -> String {
+    let label = companion_tool_label(&context.label);
+    let dominant = profile
+        .trait_scores
+        .dominant_trait(!matches!(context.outcome, CompanionToolOutcome::Failure));
+    let lead = match (context.outcome, dominant) {
+        (CompanionToolOutcome::Success, "DEBUGGING") => format!("Useful signal from {label}."),
+        (CompanionToolOutcome::Success, "PATIENCE") => format!("Steady result from {label}."),
+        (CompanionToolOutcome::Success, "CHAOS") => {
+            format!("{label} shook loose a workable clue.")
+        }
+        (CompanionToolOutcome::Success, "WISDOM") => format!("Good signal from {label}."),
+        (CompanionToolOutcome::Success, "SNARK") => {
+            format!("Well, {label} finally said something useful.")
+        }
+        (CompanionToolOutcome::Failure, "DEBUGGING") => {
+            format!("{label} exposed the constraint cleanly.")
+        }
+        (CompanionToolOutcome::Failure, "PATIENCE") => {
+            format!("{label} missed, but it still narrowed the path.")
+        }
+        (CompanionToolOutcome::Failure, "CHAOS") => {
+            format!("{label} made a mess, and the mess is informative.")
+        }
+        (CompanionToolOutcome::Failure, "WISDOM") => {
+            format!("{label} missed, but the map improved.")
+        }
+        (CompanionToolOutcome::Failure, _) => {
+            format!("{label} missed, but it told us where to tighten next.")
+        }
+        _ => format!("Useful signal from {label}."),
+    };
+    let hint = match (context.outcome, context.family, context.risk) {
+        (CompanionToolOutcome::Success, CompanionToolFamily::Web, _) => {
+            "Verify source quality, not just the first hit."
+        }
+        (CompanionToolOutcome::Success, CompanionToolFamily::Mcp, _) => {
+            "Connector state may drift, so confirm before acting on it."
+        }
+        (
+            CompanionToolOutcome::Success,
+            CompanionToolFamily::Patch | CompanionToolFamily::Exec,
+            CompanionToolRisk::Mutating,
+        ) => "Prove behavior, don't trust the diff.",
+        (CompanionToolOutcome::Success, CompanionToolFamily::Image, _) => {
+            "Judge it in context, not just as an isolated asset."
+        }
+        (CompanionToolOutcome::Success, CompanionToolFamily::ViewImage, _) => {
+            "Check composition in context before you call it done."
+        }
+        (CompanionToolOutcome::Success, _, CompanionToolRisk::ReadOnly) => {
+            "Use it as a clue, then test the edge it implies."
+        }
+        (CompanionToolOutcome::Failure, CompanionToolFamily::Web, _) => {
+            "Refine the query instead of trusting a noisy search path."
+        }
+        (CompanionToolOutcome::Failure, CompanionToolFamily::Mcp, _) => {
+            "Assume the remote edge is messy and narrow the next call."
+        }
+        (CompanionToolOutcome::Failure, _, CompanionToolRisk::Mutating) => {
+            "Tighten the next attempt around the exact failing edge."
+        }
+        (CompanionToolOutcome::Failure, _, CompanionToolRisk::Visual) => {
+            "Adjust the prompt or framing, then verify the result in context."
+        }
+        (CompanionToolOutcome::Failure, _, _) => {
+            "Use the miss to narrow the next check instead of widening it."
+        }
+        _ => "Take the signal, then verify the next meaningful edge.",
+    };
+    format!("{lead} {hint}")
+}
+
+fn exec_tool_risk(parsed: &[ParsedCommand]) -> CompanionToolRisk {
+    if !parsed.is_empty()
+        && parsed.iter().all(|parsed| {
+            matches!(
+                parsed,
+                ParsedCommand::Read { .. }
+                    | ParsedCommand::ListFiles { .. }
+                    | ParsedCommand::Search { .. }
+            )
+        })
+    {
+        CompanionToolRisk::ReadOnly
+    } else {
+        CompanionToolRisk::Mutating
+    }
+}
+
+fn patch_tool_label(change_count: usize) -> String {
+    if change_count == 1 {
+        "1 file patch".to_string()
+    } else {
+        format!("{change_count} file patch")
+    }
+}
+
+fn web_tool_label(query: &str, action: &codex_protocol::models::WebSearchAction) -> String {
+    match action {
+        codex_protocol::models::WebSearchAction::Search { .. } => format!("web search: {query}"),
+        codex_protocol::models::WebSearchAction::OpenPage { url } => url
+            .clone()
+            .map(|url| format!("open page: {url}"))
+            .unwrap_or_else(|| format!("open page for {query}")),
+        codex_protocol::models::WebSearchAction::FindInPage { url, pattern } => {
+            match (pattern.as_deref(), url.as_deref()) {
+                (Some(pattern), Some(url)) => format!("find '{pattern}' in {url}"),
+                (Some(pattern), None) => format!("find '{pattern}'"),
+                (None, Some(url)) => format!("find in {url}"),
+                (None, None) => format!("find in page for {query}"),
+            }
+        }
+        codex_protocol::models::WebSearchAction::Other => format!("web lookup: {query}"),
+    }
+}
+
+fn is_buddy_teaser_window() -> bool {
+    let today = Local::now().date_naive();
+    today.year() == 2026 && today.month() == 4 && today.day() <= 7
+}
+
+fn buddy_teaser_line() -> Line<'static> {
+    const COLORS: [Color; 7] = [
+        Color::Red,
+        Color::Yellow,
+        Color::Green,
+        Color::Cyan,
+        Color::Blue,
+        Color::Magenta,
+        Color::LightRed,
+    ];
+    let mut spans = vec![Span::raw("• Companion slot available. Hatch one with ")];
+    for (idx, ch) in "/buddy".chars().enumerate() {
+        spans.push(Span::styled(
+            ch.to_string(),
+            Style::default()
+                .fg(COLORS[idx % COLORS.len()])
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans.push(Span::raw("."));
+    Line::from(spans)
+}
+
+fn companion_animation(face: &str) -> codex_protocol::protocol::PluginUiAnimation {
+    codex_protocol::protocol::PluginUiAnimation {
+        idle_frames: vec![
+            face.to_string(),
+            format!(".{face}."),
+            format!(":{face}:"),
+            format!(";{face};"),
+        ],
+        reaction_frames: vec![
+            format!("!{face}!"),
+            format!("*{face}*"),
+            format!("+{face}+"),
+        ],
+        pet_frames: vec![
+            format!("~{face}~"),
+            format!("^{face}^"),
+            format!("'{face}'"),
+        ],
+        idle_frame_ms: Some(500),
+        reaction_frame_ms: Some(180),
+        pet_frame_ms: Some(120),
+    }
+}
 
 /// Choose the keybinding used to edit the most-recently queued message.
 ///
@@ -291,6 +1069,7 @@ fn queued_message_edit_binding_for_terminal(terminal_info: TerminalInfo) -> KeyB
 }
 
 use crate::app_event::AppEvent;
+use crate::app_event::CompanionAction;
 use crate::app_event::ConnectorsSnapshot;
 use crate::app_event::ExitMode;
 #[cfg(target_os = "windows")]
@@ -370,7 +1149,6 @@ use crate::streaming::commit_tick::run_commit_tick;
 use crate::streaming::controller::PlanStreamController;
 use crate::streaming::controller::StreamController;
 
-use chrono::Local;
 use codex_file_search::FileMatch;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelPreset;
@@ -830,6 +1608,8 @@ pub(crate) struct ChatWidget {
     // details here so transient stream interruptions can restore the footer
     // exactly as it was shown.
     current_status: StatusIndicatorState,
+    companion_profile_cache: Option<CompanionProfile>,
+    companion_narration: CompanionNarrationState,
     // Guardian review keeps its own pending set so it can derive a single
     // footer summary from one or more in-flight review events.
     pending_guardian_review_status: PendingGuardianReviewStatus,
@@ -1293,6 +2073,65 @@ fn hook_output_entry_from_notification(
     }
 }
 
+fn plugin_ui_animation_from_notification(
+    animation: codex_app_server_protocol::PluginUiAnimation,
+) -> codex_protocol::protocol::PluginUiAnimation {
+    codex_protocol::protocol::PluginUiAnimation {
+        idle_frames: animation.idle_frames,
+        reaction_frames: animation.reaction_frames,
+        pet_frames: animation.pet_frames,
+        idle_frame_ms: animation.idle_frame_ms,
+        reaction_frame_ms: animation.reaction_frame_ms,
+        pet_frame_ms: animation.pet_frame_ms,
+    }
+}
+
+fn plugin_ui_event_from_notification(
+    event: codex_app_server_protocol::PluginUiEvent,
+) -> codex_protocol::protocol::PluginUiEvent {
+    match event {
+        codex_app_server_protocol::PluginUiEvent::Presence {
+            plugin,
+            visible,
+            muted,
+            label,
+            subtitle,
+            badge,
+            face,
+            color,
+            species,
+            reserved_columns,
+            animation,
+        } => codex_protocol::protocol::PluginUiEvent::Presence {
+            plugin,
+            visible,
+            muted,
+            label,
+            subtitle,
+            badge,
+            face,
+            color,
+            species,
+            reserved_columns,
+            animation: animation.map(plugin_ui_animation_from_notification),
+        },
+        codex_app_server_protocol::PluginUiEvent::Reaction {
+            plugin,
+            text,
+            kind,
+            ttl_ms,
+        } => codex_protocol::protocol::PluginUiEvent::Reaction {
+            plugin,
+            text,
+            kind,
+            ttl_ms,
+        },
+        codex_app_server_protocol::PluginUiEvent::Pet { plugin, ttl_ms } => {
+            codex_protocol::protocol::PluginUiEvent::Pet { plugin, ttl_ms }
+        }
+    }
+}
+
 fn hook_run_summary_from_notification(
     run: codex_app_server_protocol::HookRunSummary,
 ) -> codex_protocol::protocol::HookRunSummary {
@@ -1313,6 +2152,11 @@ fn hook_run_summary_from_notification(
             .entries
             .into_iter()
             .map(hook_output_entry_from_notification)
+            .collect(),
+        plugin_ui_events: run
+            .plugin_ui_events
+            .into_iter()
+            .map(plugin_ui_event_from_notification)
             .collect(),
     }
 }
@@ -1676,8 +2520,7 @@ impl ChatWidget {
             self.terminal_title_status_kind = TerminalTitleStatusKind::Thinking;
             self.set_status_header(header);
         } else if self.bottom_pane.is_task_running() {
-            self.terminal_title_status_kind = TerminalTitleStatusKind::Working;
-            self.set_status_header(String::from("Working"));
+            self.set_default_working_status();
         }
     }
 
@@ -1796,6 +2639,188 @@ impl ChatWidget {
             StatusDetailsCapitalization::CapitalizeFirst,
             STATUS_DETAILS_DEFAULT_MAX_LINES,
         );
+    }
+
+    fn active_companion_profile(&self) -> Option<CompanionProfile> {
+        self.companion_profile_cache
+            .clone()
+            .filter(|profile| !profile.state.muted)
+    }
+
+    fn reset_companion_narration_turn(&mut self) {
+        self.companion_narration = CompanionNarrationState::default();
+    }
+
+    fn set_default_working_status(&mut self) {
+        if !self.apply_companion_progress(
+            CompanionNarrationKind::TaskStart,
+            None,
+            /*persist_history*/ false,
+        ) {
+            self.set_status_header(String::from("Working"));
+        }
+    }
+
+    fn apply_companion_progress(
+        &mut self,
+        kind: CompanionNarrationKind,
+        details: Option<String>,
+        persist_history: bool,
+    ) -> bool {
+        let Some(profile) = self.active_companion_profile() else {
+            return false;
+        };
+
+        let line = companion_narration_text(&profile, kind);
+        let changed = self.companion_narration.last_kind != Some(kind)
+            || self.companion_narration.last_line.as_deref() != Some(line.as_str());
+
+        self.terminal_title_status_kind = match kind {
+            CompanionNarrationKind::Reasoning => TerminalTitleStatusKind::Thinking,
+            _ => TerminalTitleStatusKind::Working,
+        };
+        self.set_status(
+            line.clone(),
+            details.clone(),
+            StatusDetailsCapitalization::Preserve,
+            /*details_max_lines*/ 1,
+        );
+
+        if changed {
+            self.bottom_pane.apply_plugin_ui_events(&[
+                codex_protocol::protocol::PluginUiEvent::Reaction {
+                    plugin: COMPANION_PLUGIN_NAME.to_string(),
+                    text: line.clone(),
+                    kind: Some("status".to_string()),
+                    ttl_ms: Some(7_000),
+                },
+            ]);
+            self.companion_narration.last_kind = Some(kind);
+            self.companion_narration.last_line = Some(line.clone());
+        }
+
+        if persist_history {
+            let history_message = match details {
+                Some(detail) if !detail.is_empty() => format!("{line} {detail}"),
+                _ => line,
+            };
+            self.add_boxed_history(Box::new(history_cell::new_companion_event(
+                profile.entry.visual.face.clone(),
+                profile.state.name.clone(),
+                history_message,
+                profile.headers_and_lists_effective(),
+            )));
+        }
+        true
+    }
+
+    fn apply_companion_tool_status(&mut self, context: CompanionToolFeedbackContext) -> bool {
+        let Some(profile) = self.active_companion_profile() else {
+            return false;
+        };
+
+        let line = companion_tool_status_text(&profile, &context);
+        let details = (!context.label.trim().is_empty()).then_some(context.label.clone());
+        let changed = self.companion_narration.last_line.as_deref() != Some(line.as_str());
+
+        self.terminal_title_status_kind = TerminalTitleStatusKind::Working;
+        self.set_status(
+            line.clone(),
+            details,
+            StatusDetailsCapitalization::Preserve,
+            /*details_max_lines*/ 1,
+        );
+
+        if changed {
+            self.bottom_pane.apply_plugin_ui_events(&[
+                codex_protocol::protocol::PluginUiEvent::Reaction {
+                    plugin: COMPANION_PLUGIN_NAME.to_string(),
+                    text: line.clone(),
+                    kind: Some("status".to_string()),
+                    ttl_ms: Some(7_000),
+                },
+            ]);
+            self.companion_narration.last_line = Some(line);
+            self.companion_narration.last_kind = None;
+        }
+        true
+    }
+
+    fn add_companion_tool_history(&mut self, context: CompanionToolFeedbackContext) -> bool {
+        let Some(profile) = self.active_companion_profile() else {
+            return false;
+        };
+
+        self.add_boxed_history(Box::new(history_cell::new_companion_event(
+            profile.entry.visual.face.clone(),
+            profile.state.name.clone(),
+            companion_tool_history_text(&profile, &context),
+            profile.headers_and_lists_effective(),
+        )));
+        true
+    }
+
+    fn note_companion_wait_progress(&mut self, process_id: &str, command_display: Option<String>) {
+        let Some(profile) = self.active_companion_profile() else {
+            return;
+        };
+        let now = Instant::now();
+        let wait_state = match self.companion_narration.wait_state.as_mut() {
+            Some(state) if state.process_id == process_id => {
+                if state.command_display.is_none() {
+                    state.command_display = command_display.clone();
+                }
+                state
+            }
+            _ => {
+                self.companion_narration.wait_state = Some(CompanionWaitNarrationState {
+                    process_id: process_id.to_string(),
+                    command_display: command_display.clone(),
+                    started_at: now,
+                    escalations_emitted: 0,
+                });
+                self.companion_narration
+                    .wait_state
+                    .as_mut()
+                    .expect("wait state")
+            }
+        };
+
+        let elapsed = now
+            .saturating_duration_since(wait_state.started_at)
+            .as_secs();
+        let target_escalations = if elapsed < COMPANION_WAIT_INITIAL_SECS {
+            0
+        } else {
+            1 + ((elapsed - COMPANION_WAIT_INITIAL_SECS) / COMPANION_WAIT_REPEAT_SECS) as usize
+        };
+
+        let face = profile.entry.visual.face.clone();
+        let name = profile.state.name.clone();
+        let headers_and_lists = profile.headers_and_lists_effective();
+        let mut pending_messages: Vec<String> = Vec::new();
+        while wait_state.escalations_emitted < target_escalations {
+            wait_state.escalations_emitted += 1;
+            let detail = wait_state
+                .command_display
+                .clone()
+                .unwrap_or_else(|| "background terminal".to_string());
+            let message = companion_wait_history_text(&profile, wait_state.escalations_emitted);
+            pending_messages.push(format!("{message} {detail}"));
+        }
+
+        for message in pending_messages {
+            self.add_boxed_history(Box::new(history_cell::new_companion_event(
+                face.clone(),
+                name.clone(),
+                message,
+                headers_and_lists,
+            )));
+        }
+    }
+
+    fn clear_companion_wait_progress(&mut self) {
+        self.companion_narration.wait_state = None;
     }
 
     /// Sets the currently rendered footer status-line value.
@@ -1989,6 +3014,9 @@ impl ChatWidget {
         self.sync_personality_command_enabled();
         self.sync_plugins_command_enabled();
         self.refresh_plugin_mentions();
+        if let Err(err) = self.refresh_companion_host_ui() {
+            tracing::debug!(error = %err, "failed to refresh companion host ui");
+        }
         let startup_tooltip_override = self.startup_tooltip_override.take();
         let show_fast_status = self.should_show_fast_status(&model_for_header, event.service_tier);
         #[cfg(test)]
@@ -2003,6 +3031,7 @@ impl ChatWidget {
             show_fast_status,
         );
         self.apply_session_info_cell(session_info_cell);
+        self.maybe_show_buddy_teaser();
 
         #[cfg(test)]
         if let Some(messages) = initial_messages {
@@ -2238,11 +3267,17 @@ impl ChatWidget {
         }
 
         if let Some(header) = extract_first_bold(&self.reasoning_buffer) {
-            // Update the shimmer header to the extracted reasoning chunk header.
-            self.terminal_title_status_kind = TerminalTitleStatusKind::Thinking;
-            self.set_status_header(header);
-        } else {
-            // Fallback while we don't yet have a bold header: leave existing header as-is.
+            if self.companion_narration.active_reasoning_header.as_deref() != Some(&header) {
+                self.companion_narration.active_reasoning_header = Some(header.clone());
+                if !self.apply_companion_progress(
+                    CompanionNarrationKind::Reasoning,
+                    Some(header.clone()),
+                    /*persist_history*/ false,
+                ) {
+                    self.terminal_title_status_kind = TerminalTitleStatusKind::Thinking;
+                    self.set_status_header(header);
+                }
+            }
         }
         self.request_redraw();
     }
@@ -2267,6 +3302,7 @@ impl ChatWidget {
         self.full_reasoning_buffer.push_str(&self.reasoning_buffer);
         self.full_reasoning_buffer.push_str("\n\n");
         self.reasoning_buffer.clear();
+        self.companion_narration.active_reasoning_header = None;
     }
 
     // Raw reasoning uses the same flow as summarized reasoning
@@ -2291,10 +3327,10 @@ impl ChatWidget {
         self.update_task_running_state();
         self.retry_status_header = None;
         self.pending_status_indicator_restore = false;
+        self.reset_companion_narration_turn();
         self.bottom_pane
             .set_interrupt_hint_visible(/*visible*/ true);
-        self.terminal_title_status_kind = TerminalTitleStatusKind::Working;
-        self.set_status_header(String::from("Working"));
+        self.set_default_working_status();
         self.full_reasoning_buffer.clear();
         self.reasoning_buffer.clear();
         self.request_redraw();
@@ -2340,6 +3376,16 @@ impl ChatWidget {
             self.had_work_activity = false;
             self.request_status_line_branch_refresh();
         }
+        if !from_replay {
+            let progress_detail = self
+                .last_plan_progress
+                .map(|(completed, total)| format!("plan {completed}/{total}"));
+            let _ = self.apply_companion_progress(
+                CompanionNarrationKind::TaskComplete,
+                progress_detail,
+                /*persist_history*/ false,
+            );
+        }
         // Mark task stopped and request redraw now that all content is in history.
         self.pending_status_indicator_restore = false;
         self.agent_turn_running = false;
@@ -2350,6 +3396,7 @@ impl ChatWidget {
         self.suppressed_exec_calls.clear();
         self.last_unified_wait = None;
         self.unified_exec_wait_streak = None;
+        self.clear_companion_wait_progress();
         self.request_redraw();
 
         let had_pending_steers = !self.pending_steers.is_empty();
@@ -3228,6 +4275,11 @@ impl ChatWidget {
         self.last_plan_progress = (total > 0).then_some((completed, total));
         self.refresh_terminal_title();
         self.add_to_history(history_cell::new_plan_update(update));
+        let _ = self.apply_companion_progress(
+            CompanionNarrationKind::PlanProgress,
+            (total > 0).then_some(format!("{completed}/{total} complete")),
+            /*persist_history*/ false,
+        );
     }
 
     fn on_exec_approval_request(&mut self, _id: String, ev: ExecApprovalRequestEvent) {
@@ -3333,12 +4385,12 @@ impl ChatWidget {
                     status.details_max_lines,
                 );
             } else if self.current_status.is_guardian_review() {
-                self.set_status_header(String::from("Working"));
+                self.set_default_working_status();
             }
         } else if self.pending_guardian_review_status.is_empty()
             && self.current_status.is_guardian_review()
         {
-            self.set_status_header(String::from("Working"));
+            self.set_default_working_status();
         }
 
         if ev.status == GuardianAssessmentStatus::Approved {
@@ -3476,29 +4528,45 @@ impl ChatWidget {
             self.bottom_pane.ensure_status_indicator();
             self.bottom_pane
                 .set_interrupt_hint_visible(/*visible*/ true);
-            self.terminal_title_status_kind = TerminalTitleStatusKind::WaitingForBackgroundTerminal;
-            self.set_status(
-                "Waiting for background terminal".to_string(),
-                command_display.clone(),
-                StatusDetailsCapitalization::Preserve,
-                /*details_max_lines*/ 1,
-            );
+            if !self.apply_companion_tool_status(CompanionToolFeedbackContext {
+                family: CompanionToolFamily::Exec,
+                outcome: CompanionToolOutcome::Waiting,
+                risk: CompanionToolRisk::Mutating,
+                label: command_display
+                    .clone()
+                    .unwrap_or_else(|| "background terminal".to_string()),
+            }) {
+                self.terminal_title_status_kind =
+                    TerminalTitleStatusKind::WaitingForBackgroundTerminal;
+                self.set_status(
+                    "Waiting for background terminal".to_string(),
+                    command_display.clone(),
+                    StatusDetailsCapitalization::Preserve,
+                    /*details_max_lines*/ 1,
+                );
+            }
             match &mut self.unified_exec_wait_streak {
                 Some(wait) if wait.process_id == ev.process_id => {
-                    wait.update_command_display(command_display);
+                    wait.update_command_display(command_display.clone());
                 }
                 Some(_) => {
                     self.flush_unified_exec_wait_streak();
-                    self.unified_exec_wait_streak =
-                        Some(UnifiedExecWaitStreak::new(ev.process_id, command_display));
+                    self.unified_exec_wait_streak = Some(UnifiedExecWaitStreak::new(
+                        ev.process_id.clone(),
+                        command_display.clone(),
+                    ));
                 }
                 None => {
-                    self.unified_exec_wait_streak =
-                        Some(UnifiedExecWaitStreak::new(ev.process_id, command_display));
+                    self.unified_exec_wait_streak = Some(UnifiedExecWaitStreak::new(
+                        ev.process_id.clone(),
+                        command_display.clone(),
+                    ));
                 }
             }
+            self.note_companion_wait_progress(&ev.process_id, command_display);
             self.request_redraw();
         } else {
+            self.clear_companion_wait_progress();
             if self
                 .unified_exec_wait_streak
                 .as_ref()
@@ -3514,37 +4582,82 @@ impl ChatWidget {
     }
 
     fn on_patch_apply_begin(&mut self, event: PatchApplyBeginEvent) {
+        let label = patch_tool_label(event.changes.len());
         self.add_to_history(history_cell::new_patch_event(
             event.changes,
             &self.config.cwd,
         ));
+        let _ = self.apply_companion_tool_status(CompanionToolFeedbackContext {
+            family: CompanionToolFamily::Patch,
+            outcome: CompanionToolOutcome::Started,
+            risk: CompanionToolRisk::Mutating,
+            label,
+        });
     }
 
     fn on_view_image_tool_call(&mut self, event: ViewImageToolCallEvent) {
         self.flush_answer_stream_with_separator();
+        let label = event.path.display().to_string();
         self.add_to_history(history_cell::new_view_image_tool_call(
             event.path,
             &self.config.cwd,
         ));
+        let _ = self.add_companion_tool_history(CompanionToolFeedbackContext {
+            family: CompanionToolFamily::ViewImage,
+            outcome: CompanionToolOutcome::Success,
+            risk: CompanionToolRisk::Visual,
+            label,
+        });
         self.request_redraw();
     }
 
-    fn on_image_generation_begin(&mut self, _event: ImageGenerationBeginEvent) {
+    fn on_image_generation_begin(&mut self, event: ImageGenerationBeginEvent) {
         self.flush_answer_stream_with_separator();
+        let _ = self.apply_companion_tool_status(CompanionToolFeedbackContext {
+            family: CompanionToolFamily::Image,
+            outcome: CompanionToolOutcome::Started,
+            risk: CompanionToolRisk::Visual,
+            label: format!("image draft {}", event.call_id),
+        });
     }
 
     fn on_image_generation_end(&mut self, event: ImageGenerationEndEvent) {
         self.flush_answer_stream_with_separator();
-        let saved_path = event.saved_path.map(|saved_path| {
+        let ImageGenerationEndEvent {
+            call_id,
+            status,
+            revised_prompt,
+            result: _result,
+            saved_path,
+        } = event;
+        let history_saved_path = saved_path.clone().map(|saved_path| {
             Url::from_file_path(Path::new(&saved_path))
                 .map(|url| url.to_string())
                 .unwrap_or(saved_path)
         });
+        let label = saved_path
+            .clone()
+            .or_else(|| revised_prompt.clone())
+            .unwrap_or_else(|| "generated image".to_string());
         self.add_to_history(history_cell::new_image_generation_call(
-            event.call_id,
-            event.revised_prompt,
-            saved_path,
+            call_id,
+            revised_prompt,
+            history_saved_path,
         ));
+        let outcome = if status.eq_ignore_ascii_case("completed") {
+            CompanionToolOutcome::Success
+        } else {
+            CompanionToolOutcome::Failure
+        };
+        let _ = self.add_companion_tool_history(CompanionToolFeedbackContext {
+            family: CompanionToolFamily::Image,
+            outcome,
+            risk: CompanionToolRisk::Visual,
+            label,
+        });
+        if self.bottom_pane.is_task_running() {
+            self.set_default_working_status();
+        }
         self.request_redraw();
     }
 
@@ -3658,11 +4771,18 @@ impl ChatWidget {
     fn on_web_search_begin(&mut self, ev: WebSearchBeginEvent) {
         self.flush_answer_stream_with_separator();
         self.flush_active_cell();
+        let status_label = format!("web lookup {}", ev.call_id);
         self.active_cell = Some(Box::new(history_cell::new_active_web_search_call(
             ev.call_id,
             String::new(),
             self.config.animations,
         )));
+        let _ = self.apply_companion_tool_status(CompanionToolFeedbackContext {
+            family: CompanionToolFamily::Web,
+            outcome: CompanionToolOutcome::Started,
+            risk: CompanionToolRisk::External,
+            label: status_label,
+        });
         self.bump_active_cell_revision();
         self.request_redraw();
     }
@@ -3674,6 +4794,7 @@ impl ChatWidget {
             query,
             action,
         } = ev;
+        let buddy_label = web_tool_label(&query, &action);
         let mut handled = false;
         if let Some(cell) = self
             .active_cell
@@ -3692,6 +4813,15 @@ impl ChatWidget {
             self.add_to_history(history_cell::new_web_search_call(call_id, query, action));
         }
         self.had_work_activity = true;
+        let _ = self.add_companion_tool_history(CompanionToolFeedbackContext {
+            family: CompanionToolFamily::Web,
+            outcome: CompanionToolOutcome::Success,
+            risk: CompanionToolRisk::External,
+            label: buddy_label,
+        });
+        if self.bottom_pane.is_task_running() {
+            self.set_default_working_status();
+        }
     }
 
     fn on_collab_event(&mut self, cell: PlainHistoryCell) {
@@ -3951,11 +5081,24 @@ impl ChatWidget {
             message.push_str(": ");
             message.push_str(&status_message);
         }
-        self.add_to_history(history_cell::new_info_event(message, /*hint*/ None));
+        if !self.apply_companion_progress(
+            CompanionNarrationKind::HookStart,
+            Some(label.to_string()),
+            /*persist_history*/ true,
+        ) {
+            self.add_to_history(history_cell::new_info_event(message, /*hint*/ None));
+        }
         self.request_redraw();
     }
 
     fn on_hook_completed(&mut self, event: codex_protocol::protocol::HookCompletedEvent) {
+        self.bottom_pane
+            .apply_plugin_ui_events(&event.run.plugin_ui_events);
+        let _ = self.apply_companion_progress(
+            CompanionNarrationKind::HookFinish,
+            Some(hook_event_label(event.run.event_name).to_string()),
+            /*persist_history*/ false,
+        );
         let status = format!("{:?}", event.run.status).to_lowercase();
         let header = format!("{} hook ({status})", hook_event_label(event.run.event_name));
         let mut lines: Vec<ratatui::text::Line<'static>> = vec![header.into()];
@@ -4205,10 +5348,13 @@ impl ChatWidget {
         if self.suppressed_exec_calls.remove(&ev.call_id) {
             return;
         }
+        self.clear_companion_wait_progress();
         let (command, parsed, source) = match running {
             Some(rc) => (rc.command, rc.parsed_cmd, rc.source),
             None => (ev.command.clone(), ev.parsed_cmd.clone(), ev.source),
         };
+        let command_display = strip_bash_lc_and_escape(&command);
+        let exec_risk = exec_tool_risk(&parsed);
         let is_unified_exec_interaction =
             matches!(source, ExecCommandSource::UnifiedExecInteraction);
         let end_target = match self.active_cell.as_ref() {
@@ -4304,6 +5450,20 @@ impl ChatWidget {
         }
         // Mark that actual work was done (command executed)
         self.had_work_activity = true;
+        let _ = self.add_companion_tool_history(CompanionToolFeedbackContext {
+            family: CompanionToolFamily::Exec,
+            outcome: if ev.exit_code == 0 {
+                CompanionToolOutcome::Success
+            } else {
+                CompanionToolOutcome::Failure
+            },
+            risk: exec_risk,
+            label: command_display,
+        });
+        if self.running_commands.is_empty() {
+            self.companion_narration.tool_streak_announced = false;
+            self.set_default_working_status();
+        }
     }
 
     pub(crate) fn handle_patch_apply_end_now(
@@ -4317,6 +5477,19 @@ impl ChatWidget {
         }
         // Mark that actual work was done (patch applied)
         self.had_work_activity = true;
+        let _ = self.add_companion_tool_history(CompanionToolFeedbackContext {
+            family: CompanionToolFamily::Patch,
+            outcome: if event.success {
+                CompanionToolOutcome::Success
+            } else {
+                CompanionToolOutcome::Failure
+            },
+            risk: CompanionToolRisk::Mutating,
+            label: patch_tool_label(event.changes.len()),
+        });
+        if self.bottom_pane.is_task_running() {
+            self.set_default_working_status();
+        }
     }
 
     pub(crate) fn handle_exec_approval_now(&mut self, ev: ExecApprovalRequestEvent) {
@@ -4428,6 +5601,7 @@ impl ChatWidget {
     pub(crate) fn handle_exec_begin_now(&mut self, ev: ExecCommandBeginEvent) {
         // Ensure the status indicator is visible while the command runs.
         self.bottom_pane.ensure_status_indicator();
+        let starting_new_streak = self.running_commands.is_empty();
         self.running_commands.insert(
             ev.call_id.clone(),
             RunningCommand {
@@ -4443,6 +5617,7 @@ impl ChatWidget {
                 .map(str::is_empty)
                 .unwrap_or(true);
         let command_display = ev.command.join(" ");
+        let tool_risk = exec_tool_risk(&ev.parsed_cmd);
         let should_suppress_unified_wait = is_wait_interaction
             && self
                 .last_unified_wait
@@ -4457,6 +5632,7 @@ impl ChatWidget {
             self.suppressed_exec_calls.insert(ev.call_id);
             return;
         }
+        self.clear_companion_wait_progress();
         let interaction_input = ev.interaction_input.clone();
         if let Some(cell) = self
             .active_cell
@@ -4486,17 +5662,34 @@ impl ChatWidget {
             self.bump_active_cell_revision();
         }
 
+        if starting_new_streak && !self.companion_narration.tool_streak_announced {
+            self.companion_narration.tool_streak_announced = true;
+            let _ = self.apply_companion_tool_status(CompanionToolFeedbackContext {
+                family: CompanionToolFamily::Exec,
+                outcome: CompanionToolOutcome::Started,
+                risk: tool_risk,
+                label: strip_bash_lc_and_escape(&ev.command),
+            });
+        }
+
         self.request_redraw();
     }
 
     pub(crate) fn handle_mcp_begin_now(&mut self, ev: McpToolCallBeginEvent) {
         self.flush_answer_stream_with_separator();
         self.flush_active_cell();
+        let invocation = ev.invocation.clone();
         self.active_cell = Some(Box::new(history_cell::new_active_mcp_tool_call(
             ev.call_id,
             ev.invocation,
             self.config.animations,
         )));
+        let _ = self.apply_companion_tool_status(CompanionToolFeedbackContext {
+            family: CompanionToolFamily::Mcp,
+            outcome: CompanionToolOutcome::Started,
+            risk: CompanionToolRisk::External,
+            label: format!("{}.{}", invocation.server, invocation.tool),
+        });
         self.bump_active_cell_revision();
         self.request_redraw();
     }
@@ -4509,6 +5702,8 @@ impl ChatWidget {
             duration,
             result,
         } = ev;
+        let success = matches!(&result, Ok(ok) if !ok.is_error.unwrap_or(false));
+        let buddy_label = format!("{}.{}", invocation.server, invocation.tool);
 
         let extra_cell = match self
             .active_cell
@@ -4535,6 +5730,19 @@ impl ChatWidget {
         }
         // Mark that actual work was done (MCP tool call)
         self.had_work_activity = true;
+        let _ = self.add_companion_tool_history(CompanionToolFeedbackContext {
+            family: CompanionToolFamily::Mcp,
+            outcome: if success {
+                CompanionToolOutcome::Success
+            } else {
+                CompanionToolOutcome::Failure
+            },
+            risk: CompanionToolRisk::External,
+            label: buddy_label,
+        });
+        if self.bottom_pane.is_task_running() {
+            self.set_default_working_status();
+        }
     }
 
     pub(crate) fn new_with_app_event(common: ChatWidgetInit) -> Self {
@@ -4667,6 +5875,8 @@ impl ChatWidget {
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
             current_status: StatusIndicatorState::working(),
+            companion_profile_cache: None,
+            companion_narration: CompanionNarrationState::default(),
             pending_guardian_review_status: PendingGuardianReviewStatus::default(),
             terminal_title_status_kind: TerminalTitleStatusKind::Working,
             retry_status_header: None,
@@ -4886,7 +6096,7 @@ impl ChatWidget {
                         // Reset any reasoning header only when we are actually submitting a turn.
                         self.reasoning_buffer.clear();
                         self.full_reasoning_buffer.clear();
-                        self.set_status_header(String::from("Working"));
+                        self.set_default_working_status();
                         self.submit_user_message(user_message);
                     } else {
                         self.queue_user_message(user_message);
@@ -4991,6 +6201,672 @@ impl ChatWidget {
         false
     }
 
+    fn companion_plugin_context(&self) -> Result<CompanionPluginContext, String> {
+        if !self.config.features.enabled(Feature::Plugins) {
+            return Err("Plugins are disabled, so /buddy is unavailable.".to_string());
+        }
+
+        let loaded_plugins =
+            PluginsManager::new(self.config.codex_home.clone()).plugins_for_config(&self.config);
+        let Some(plugin) = loaded_plugins.plugins().iter().find(|plugin| {
+            plugin.manifest_name.as_deref() == Some(COMPANION_PLUGIN_NAME)
+                || plugin
+                    .config_name
+                    .starts_with(&format!("{COMPANION_PLUGIN_NAME}@"))
+        }) else {
+            return Err("The Companion plugin is not enabled in this session.".to_string());
+        };
+
+        Ok(CompanionPluginContext {
+            root: plugin.root.to_path_buf(),
+            data_dir: self
+                .config
+                .codex_home
+                .join("plugins")
+                .join("data")
+                .join(COMPANION_PLUGIN_NAME),
+        })
+    }
+
+    fn load_companion_registry(
+        &self,
+        context: &CompanionPluginContext,
+    ) -> Result<CompanionRegistry, String> {
+        let path = context.root.join(COMPANION_REGISTRY_FILE);
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
+        serde_json::from_str(&contents)
+            .map_err(|err| format!("Failed to parse {}: {err}", path.display()))
+    }
+
+    fn load_companion_state(
+        &self,
+        context: &CompanionPluginContext,
+    ) -> Result<Option<CompanionState>, String> {
+        let path = context.data_dir.join(COMPANION_STATE_FILE);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
+        let state = serde_json::from_str(&contents)
+            .map_err(|err| format!("Failed to parse {}: {err}", path.display()))?;
+        Ok(Some(state))
+    }
+
+    fn load_companion_profile(
+        &self,
+        context: &CompanionPluginContext,
+    ) -> Result<Option<CompanionProfile>, String> {
+        let registry = self.load_companion_registry(context)?;
+        let Some(state) = self.load_companion_state(context)? else {
+            return Ok(None);
+        };
+        let Some(entry) = registry
+            .types
+            .into_iter()
+            .find(|entry| entry.code.eq_ignore_ascii_case(&state.type_code))
+        else {
+            return Err(format!(
+                "Companion type '{}' is missing from the registry.",
+                state.type_code
+            ));
+        };
+        let axes = state.normalized_axes();
+        let format_mode = CompanionHeadersAndListsMode::from_state(&state);
+        let persona_version = state
+            .persona_version
+            .or(registry.persona_version)
+            .unwrap_or(1);
+        Ok(Some(CompanionProfile {
+            state,
+            entry,
+            persona_version,
+            axes,
+            format_mode,
+            style_labels: companion_style_labels(axes),
+            characteristics: companion_characteristics(axes, format_mode),
+            trait_scores: CompanionTraitScores::from_axes(axes),
+        }))
+    }
+
+    fn refresh_companion_host_ui(&mut self) -> Result<(), String> {
+        let context = match self.companion_plugin_context() {
+            Ok(context) => context,
+            Err(err) => {
+                self.companion_profile_cache = None;
+                self.companion_narration = CompanionNarrationState::default();
+                self.bottom_pane.apply_plugin_ui_events(&[
+                    codex_protocol::protocol::PluginUiEvent::Presence {
+                        plugin: COMPANION_PLUGIN_NAME.to_string(),
+                        visible: false,
+                        muted: false,
+                        label: None,
+                        subtitle: None,
+                        badge: None,
+                        face: None,
+                        color: None,
+                        species: None,
+                        reserved_columns: None,
+                        animation: None,
+                    },
+                ]);
+                return Err(err);
+            }
+        };
+        let event = match self.load_companion_profile(&context)? {
+            Some(profile) => {
+                self.companion_profile_cache = Some(profile.clone());
+                let label = profile.state.name.clone();
+                let badge = profile.entry.code.clone();
+                let face = profile.entry.visual.face.clone();
+                let reserved_columns = label
+                    .len()
+                    .max(face.len())
+                    .saturating_add(badge.len())
+                    .saturating_add(4)
+                    .max(12) as u16;
+                codex_protocol::protocol::PluginUiEvent::Presence {
+                    plugin: COMPANION_PLUGIN_NAME.to_string(),
+                    visible: true,
+                    muted: profile.state.muted,
+                    label: Some(label),
+                    subtitle: Some(profile.entry.display_name.clone()),
+                    badge: Some(badge),
+                    face: Some(face.clone()),
+                    color: Some("cyan".to_string()),
+                    species: Some(profile.entry.visual.species.clone()),
+                    reserved_columns: Some(reserved_columns),
+                    animation: Some(companion_animation(&face)),
+                }
+            }
+            None => {
+                self.companion_profile_cache = None;
+                self.companion_narration = CompanionNarrationState::default();
+                codex_protocol::protocol::PluginUiEvent::Presence {
+                    plugin: COMPANION_PLUGIN_NAME.to_string(),
+                    visible: false,
+                    muted: false,
+                    label: None,
+                    subtitle: None,
+                    badge: None,
+                    face: None,
+                    color: None,
+                    species: None,
+                    reserved_columns: None,
+                    animation: None,
+                }
+            }
+        };
+        self.bottom_pane
+            .apply_plugin_ui_events(std::slice::from_ref(&event));
+        Ok(())
+    }
+
+    fn maybe_show_buddy_teaser(&mut self) {
+        if !is_buddy_teaser_window() {
+            return;
+        }
+        let Ok(context) = self.companion_plugin_context() else {
+            return;
+        };
+        let should_show = match self.load_companion_state(&context) {
+            Ok(None) => true,
+            Ok(Some(state)) => !state.teaser_dismissed,
+            Err(_) => false,
+        };
+        if should_show {
+            self.add_boxed_history(Box::new(PlainHistoryCell::new(vec![
+                buddy_teaser_line(),
+                Line::from("  Open /buddy to hatch or manage your companion.".dark_gray()),
+            ])));
+        }
+    }
+
+    fn open_buddy_popup(&mut self) {
+        let context = match self.companion_plugin_context() {
+            Ok(context) => context,
+            Err(err) => {
+                self.add_error_message(err);
+                return;
+            }
+        };
+        let registry = match self.load_companion_registry(&context) {
+            Ok(registry) => registry,
+            Err(err) => {
+                self.add_error_message(err);
+                return;
+            }
+        };
+        let profile = match self.load_companion_profile(&context) {
+            Ok(profile) => profile,
+            Err(err) => {
+                self.add_error_message(err);
+                return;
+            }
+        };
+
+        let mut items = Vec::new();
+        if let Some(profile) = profile.as_ref() {
+            items.push(SelectionItem {
+                name: format!("Show {}", profile.state.name),
+                description: Some("Print the current companion profile.".to_string()),
+                actions: vec![Box::new(|tx| {
+                    tx.send(AppEvent::CompanionAction(
+                        CompanionAction::RunBuddyCommand {
+                            args: vec!["show".to_string()],
+                        },
+                    ));
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+            items.push(SelectionItem {
+                name: format!("Pet {}", profile.state.name),
+                description: Some("Trigger a quick companion reaction.".to_string()),
+                actions: vec![Box::new(|tx| {
+                    tx.send(AppEvent::CompanionAction(
+                        CompanionAction::RunBuddyCommand {
+                            args: vec!["pet".to_string()],
+                        },
+                    ));
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+            items.push(SelectionItem {
+                name: if profile.state.muted {
+                    format!("Unmute {}", profile.state.name)
+                } else {
+                    format!("Mute {}", profile.state.name)
+                },
+                description: Some("Toggle whether the companion is visible/reactive.".to_string()),
+                actions: vec![Box::new({
+                    let command = if profile.state.muted {
+                        "unmute".to_string()
+                    } else {
+                        "mute".to_string()
+                    };
+                    move |tx| {
+                        tx.send(AppEvent::CompanionAction(
+                            CompanionAction::RunBuddyCommand {
+                                args: vec![command.clone()],
+                            },
+                        ));
+                    }
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+            items.push(SelectionItem {
+                name: "Reset companion".to_string(),
+                description: Some(
+                    "Delete the current profile so you can hatch a new one.".to_string(),
+                ),
+                actions: vec![Box::new(|tx| {
+                    tx.send(AppEvent::CompanionAction(
+                        CompanionAction::RunBuddyCommand {
+                            args: vec!["reset".to_string()],
+                        },
+                    ));
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+
+            for (axis_name, current_value, current_label, values) in [
+                (
+                    "attitude",
+                    profile.axes.attitude,
+                    profile.axes.axis_label("attitude"),
+                    [('E', "Extraversion"), ('I', "Introversion")],
+                ),
+                (
+                    "observation",
+                    profile.axes.observation,
+                    profile.axes.axis_label("observation"),
+                    [('S', "Sensing"), ('N', "Intuition")],
+                ),
+                (
+                    "decision",
+                    profile.axes.decision,
+                    profile.axes.axis_label("decision"),
+                    [('T', "Thinking"), ('F', "Feeling")],
+                ),
+                (
+                    "lifestyle",
+                    profile.axes.lifestyle,
+                    profile.axes.axis_label("lifestyle"),
+                    [('J', "Judging"), ('P', "Perceiving")],
+                ),
+            ] {
+                for (value, label) in values {
+                    let args = vec![
+                        "set-axis".to_string(),
+                        axis_name.to_string(),
+                        value.to_string(),
+                    ];
+                    items.push(SelectionItem {
+                        name: format!("{axis_name}: {label} ({value})"),
+                        description: Some(format!("Current: {current_label} ({current_value})")),
+                        selected_description: Some(format!(
+                            "Set {axis_name} to {label} ({value}) and recompute the MBTI type."
+                        )),
+                        is_current: current_value == value,
+                        is_default: current_value == value,
+                        search_value: Some(format!(
+                            "{axis_name} {label} {value} current {current_label} {current_value}"
+                        )),
+                        actions: vec![Box::new(move |tx| {
+                            tx.send(AppEvent::CompanionAction(
+                                CompanionAction::RunBuddyCommand { args: args.clone() },
+                            ));
+                        })],
+                        dismiss_on_select: true,
+                        ..Default::default()
+                    });
+                }
+            }
+
+            for mode in ["auto", "on", "off"] {
+                let args = vec![
+                    "format".to_string(),
+                    "headers-lists".to_string(),
+                    mode.to_string(),
+                ];
+                items.push(SelectionItem {
+                    name: format!("headers & lists: {mode}"),
+                    description: Some(format!("Current: {}", profile.format_mode_label())),
+                    selected_description: Some(format!(
+                        "Set Buddy's headers & lists preference to {mode}."
+                    )),
+                    is_current: profile.format_mode_label() == mode,
+                    is_default: profile.format_mode_label() == mode,
+                    search_value: Some(format!("format headers lists {mode}")),
+                    actions: vec![Box::new(move |tx| {
+                        tx.send(AppEvent::CompanionAction(
+                            CompanionAction::RunBuddyCommand { args: args.clone() },
+                        ));
+                    })],
+                    dismiss_on_select: true,
+                    ..Default::default()
+                });
+            }
+        }
+
+        for entry in registry.types {
+            let current_type = profile
+                .as_ref()
+                .is_some_and(|profile| profile.entry.code == entry.code);
+            let action_args = if profile.is_some() {
+                vec!["set-type".to_string(), entry.code.clone()]
+            } else {
+                vec![
+                    "setup".to_string(),
+                    entry.code.clone(),
+                    entry.default_name.clone(),
+                ]
+            };
+            let name = if profile.is_some() {
+                format!("Switch to {}", entry.code)
+            } else {
+                format!("Hatch {}", entry.code)
+            };
+            let description = format!("{} | {}", entry.display_name, entry.summary);
+            let search_value = format!(
+                "{} {} {} {}",
+                entry.code, entry.display_name, entry.summary, entry.default_name
+            );
+            items.push(SelectionItem {
+                name,
+                description: Some(description),
+                selected_description: Some(format!(
+                    "{} | {} | default name {}",
+                    entry.display_name, entry.summary, entry.default_name
+                )),
+                is_current: current_type,
+                is_default: current_type,
+                search_value: Some(search_value),
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::CompanionAction(
+                        CompanionAction::RunBuddyCommand {
+                            args: action_args.clone(),
+                        },
+                    ));
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+        }
+
+        let side_lines = if let Some(profile) = profile {
+            vec![
+                profile.buddy_prefix_line(),
+                Line::from(profile.entry.summary.clone()),
+                Line::from(""),
+                Line::from("MBTI dimensions:").dark_gray(),
+                Line::from(format!(
+                    "  Attitude: {} ({})",
+                    profile.axes.axis_label("attitude"),
+                    profile.axes.attitude
+                )),
+                Line::from(format!(
+                    "  Observation: {} ({})",
+                    profile.axes.axis_label("observation"),
+                    profile.axes.observation
+                )),
+                Line::from(format!(
+                    "  Decision: {} ({})",
+                    profile.axes.axis_label("decision"),
+                    profile.axes.decision
+                )),
+                Line::from(format!(
+                    "  Lifestyle: {} ({})",
+                    profile.axes.axis_label("lifestyle"),
+                    profile.axes.lifestyle
+                )),
+                Line::from(""),
+                Line::from("Derived style snapshot:").dark_gray(),
+                Line::from(format!("  {}", profile.style_labels.join(", "))),
+                Line::from(format!(
+                    "  warm={} | enthusiastic={}",
+                    if profile.characteristics.warm {
+                        "yes"
+                    } else {
+                        "no"
+                    },
+                    if profile.characteristics.enthusiastic {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                )),
+                Line::from(""),
+                Line::from("Trait dashboard:").dark_gray(),
+                Line::from(format!(
+                    "  DBG {} | PAT {} | CHA {}",
+                    profile.trait_scores.debugging,
+                    profile.trait_scores.patience,
+                    profile.trait_scores.chaos
+                )),
+                Line::from(format!(
+                    "  WIS {} | SNK {}",
+                    profile.trait_scores.wisdom, profile.trait_scores.snark
+                )),
+                Line::from(""),
+                Line::from("Format preference:").dark_gray(),
+                Line::from(format!(
+                    "  headers & lists: {} ({})",
+                    profile.format_mode_label(),
+                    if profile.headers_and_lists_effective() {
+                        "effective on"
+                    } else {
+                        "effective off"
+                    }
+                )),
+                Line::from(format!(
+                    "Species: {} | Hat: {} | Motif: {}",
+                    profile.entry.visual.species,
+                    profile.entry.visual.hat,
+                    profile.entry.visual.motif
+                ))
+                .dark_gray(),
+                Line::from(format!(
+                    "Persona v{} | Reaction style: {}",
+                    profile.persona_version, profile.entry.reaction_style
+                ))
+                .dark_gray(),
+                Line::from(""),
+                Line::from("Inline commands:"),
+                Line::from("  /buddy pet"),
+                Line::from("  /buddy rename \"Orbit\""),
+                Line::from("  /buddy set-type ENFP"),
+                Line::from("  /buddy set-axis attitude E"),
+                Line::from("  /buddy format headers-lists auto"),
+            ]
+        } else {
+            vec![
+                buddy_teaser_line(),
+                Line::from(""),
+                Line::from("Pick a type to hatch your companion.").dark_gray(),
+                Line::from("You can also run:"),
+                Line::from("  /buddy setup INTJ Vector"),
+                Line::from("  /buddy setup ENFP Orbit"),
+                Line::from(""),
+                Line::from("Use search to filter the 16 available styles.").dark_gray(),
+            ]
+        };
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some(format!("/{BUDDY_COMMAND_NAME}")),
+            subtitle: Some("Companion controls".to_string()),
+            footer_hint: Some(Line::from(
+                "Use /buddy rename <NAME> to rename your companion.".dark_gray(),
+            )),
+            items,
+            is_searchable: true,
+            search_placeholder: Some("Search companion actions or types".to_string()),
+            side_content: Box::new(CompanionTextPanel { lines: side_lines }),
+            side_content_width: crate::bottom_pane::SideContentWidth::Half,
+            side_content_min_width: 26,
+            ..Default::default()
+        });
+        self.request_redraw();
+    }
+
+    fn companion_manager_command(
+        &self,
+        context: &CompanionPluginContext,
+        args: &[String],
+    ) -> Result<std::process::Output, String> {
+        let mut command = Command::new("python3");
+        command.arg(context.root.join(COMPANION_MANAGER_SCRIPT_REL));
+        for arg in args {
+            command.arg(arg);
+        }
+        command.env("CLAUDE_PLUGIN_DATA", &context.data_dir);
+        command.env("CODEX_PLUGIN_DATA", &context.data_dir);
+        command.env("CLAUDE_PLUGIN_ROOT", &context.root);
+        command.env("CODEX_PLUGIN_ROOT", &context.root);
+        command
+            .output()
+            .map_err(|err| format!("Failed to run companion manager: {err}"))
+    }
+
+    fn add_companion_output(&mut self, text: &str, is_error: bool) {
+        let lines = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                if is_error {
+                    Line::from(Span::styled(
+                        line.to_string(),
+                        Style::default().fg(Color::Red),
+                    ))
+                } else {
+                    Line::from(line.to_string())
+                }
+            })
+            .collect::<Vec<_>>();
+        if lines.is_empty() {
+            return;
+        }
+        self.add_boxed_history(Box::new(PlainHistoryCell::new(lines)));
+    }
+
+    fn maybe_emit_buddy_reaction_from_output(&mut self, args: &[String], stdout: &str) {
+        let Some(command) = args.first().map(String::as_str) else {
+            return;
+        };
+        let reaction = match command {
+            "pet" => stdout
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':')
+                        .map(|(_, text)| text.trim().to_string())
+                })
+                .filter(|text| !text.is_empty())
+                .map(|text| (text, "pet", Some(10_000_u64), true)),
+            "setup" => stdout
+                .lines()
+                .find_map(|line| {
+                    line.trim()
+                        .strip_prefix("- ")
+                        .map(|text| text.trim().to_string())
+                })
+                .or_else(|| {
+                    stdout
+                        .lines()
+                        .find(|line| line.starts_with("Companion hatched:"))
+                        .map(|line| line.trim().to_string())
+                })
+                .filter(|text| !text.is_empty())
+                .map(|text| (text, "setup", Some(12_000_u64), false)),
+            "set-type" => stdout
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .map(|line| line.trim().to_string())
+                .filter(|text| !text.is_empty())
+                .map(|text| (text, "set-type", Some(10_000_u64), false)),
+            "set-axis" => stdout
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .map(|line| line.trim().to_string())
+                .filter(|text| !text.is_empty())
+                .map(|text| (text, "set-type", Some(10_000_u64), false)),
+            "rename" => stdout
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .map(|line| line.trim().to_string())
+                .filter(|text| !text.is_empty())
+                .map(|text| (text, "rename", Some(10_000_u64), false)),
+            _ => None,
+        };
+        let Some((text, kind, ttl_ms, emit_pet_event)) = reaction else {
+            return;
+        };
+        let mut events = vec![codex_protocol::protocol::PluginUiEvent::Reaction {
+            plugin: COMPANION_PLUGIN_NAME.to_string(),
+            text,
+            kind: Some(kind.to_string()),
+            ttl_ms,
+        }];
+        if emit_pet_event {
+            events.push(codex_protocol::protocol::PluginUiEvent::Pet {
+                plugin: COMPANION_PLUGIN_NAME.to_string(),
+                ttl_ms: Some(2_500),
+            });
+        }
+        self.bottom_pane.apply_plugin_ui_events(&events);
+    }
+
+    pub(crate) fn run_buddy_command(&mut self, args: Vec<String>) {
+        if args.is_empty() {
+            self.open_buddy_popup();
+            return;
+        }
+
+        let context = match self.companion_plugin_context() {
+            Ok(context) => context,
+            Err(err) => {
+                self.add_error_message(err);
+                return;
+            }
+        };
+
+        let output = match self.companion_manager_command(&context, &args) {
+            Ok(output) => output,
+            Err(err) => {
+                self.add_error_message(err);
+                return;
+            }
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let is_error = !output.status.success();
+
+        if !stdout.is_empty() {
+            self.add_companion_output(&stdout, is_error);
+        }
+        let stderr_is_empty = stderr.is_empty();
+        if !stderr.is_empty() {
+            self.add_error_message(stderr);
+        }
+        if stdout.is_empty() && stderr_is_empty && is_error {
+            self.add_error_message("Companion command failed.".to_string());
+        }
+
+        if let Err(err) = self.refresh_companion_host_ui() {
+            self.add_error_message(err);
+            return;
+        }
+        if !is_error {
+            self.maybe_emit_buddy_reaction_from_output(&args, &stdout);
+        }
+        self.request_redraw();
+    }
+
     fn dispatch_command(&mut self, cmd: SlashCommand) {
         if !cmd.available_during_task() && self.bottom_pane.is_task_running() {
             let message = format!(
@@ -5092,6 +6968,9 @@ impl ChatWidget {
             }
             SlashCommand::Personality => {
                 self.open_personality_popup();
+            }
+            SlashCommand::Buddy => {
+                self.open_buddy_popup();
             }
             SlashCommand::Plan => {
                 if !self.collaboration_modes_enabled() {
@@ -5438,7 +7317,7 @@ impl ChatWidget {
                 if self.is_session_configured() {
                     self.reasoning_buffer.clear();
                     self.full_reasoning_buffer.clear();
-                    self.set_status_header(String::from("Working"));
+                    self.set_default_working_status();
                     self.submit_user_message(user_message);
                 } else {
                     self.queue_user_message(user_message);
@@ -5470,6 +7349,22 @@ impl ChatWidget {
                     .send(AppEvent::BeginWindowsSandboxGrantReadRoot {
                         path: prepared_args,
                     });
+                self.bottom_pane.drain_pending_submission_state();
+            }
+            SlashCommand::Buddy if !trimmed.is_empty() => {
+                let Some((prepared_args, _prepared_elements)) = self
+                    .bottom_pane
+                    .prepare_inline_args_submission(/*record_history*/ false)
+                else {
+                    return;
+                };
+                let parsed = shlex::split(&prepared_args).unwrap_or_else(|| {
+                    prepared_args
+                        .split_whitespace()
+                        .map(ToString::to_string)
+                        .collect()
+                });
+                self.run_buddy_command(parsed);
                 self.bottom_pane.drain_pending_submission_state();
             }
             _ => self.dispatch_command(cmd),
@@ -10790,6 +12685,14 @@ impl ChatWidget {
         };
         let mut flex = FlexRenderable::new();
         flex.push(/*flex*/ 1, active_cell_renderable);
+        if let Some(float) = self.bottom_pane.companion_float() {
+            flex.push(
+                /*flex*/ 0,
+                RenderableItem::Owned(Box::new(float)).inset(Insets::tlbr(
+                    /*top*/ 1, /*left*/ 0, /*bottom*/ 0, /*right*/ 0,
+                )),
+            );
+        }
         flex.push(
             /*flex*/ 0,
             RenderableItem::Borrowed(&self.bottom_pane).inset(Insets::tlbr(

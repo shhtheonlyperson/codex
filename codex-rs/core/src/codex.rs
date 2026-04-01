@@ -67,6 +67,7 @@ use codex_hooks::HookPayload;
 use codex_hooks::HookResult;
 use codex_hooks::Hooks;
 use codex_hooks::HooksConfig;
+use codex_hooks::PluginHookSource;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::default_client::originator;
@@ -279,6 +280,7 @@ use crate::mentions::collect_tool_mentions_from_messages;
 use crate::network_policy_decision::execpolicy_network_rule_amendment;
 use crate::plugins::PluginsManager;
 use crate::plugins::build_plugin_injections;
+use crate::plugins::load_plugin_manifest;
 use crate::plugins::render_plugins_section;
 use crate::project_doc::get_user_instructions;
 use crate::resolve_skill_dependencies_for_turn;
@@ -1844,10 +1846,45 @@ impl Session {
             default_shell.derive_exec_args("", /*use_login_shell*/ false);
         let hook_shell_program = hook_shell_argv.remove(0);
         let _ = hook_shell_argv.pop();
+        let plugin_hook_sources = if config.features.enabled(Feature::Plugins) {
+            plugins_manager
+                .plugins_for_config(&config)
+                .plugins()
+                .iter()
+                .filter(|plugin| plugin.is_active())
+                .filter_map(|plugin| {
+                    let manifest = load_plugin_manifest(plugin.root.as_path())?;
+                    let hooks_path = manifest.paths.hooks?;
+                    let plugin_name = manifest.name;
+                    let data_dir = config
+                        .codex_home
+                        .join("plugins")
+                        .join("data")
+                        .join(&plugin_name);
+                    if let Err(err) = std::fs::create_dir_all(&data_dir) {
+                        warn!(
+                            plugin = plugin_name,
+                            path = %data_dir.display(),
+                            "failed to prepare plugin hook data dir: {err}"
+                        );
+                        return None;
+                    }
+                    Some(PluginHookSource {
+                        plugin_name,
+                        plugin_root: plugin.root.to_path_buf(),
+                        data_dir,
+                        hooks_path: hooks_path.to_path_buf(),
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let hooks = Hooks::new(HooksConfig {
             legacy_notify_argv: config.notify.clone(),
             feature_enabled: config.features.enabled(Feature::CodexHooks),
             config_layer_stack: Some(config.config_layer_stack.clone()),
+            plugin_hook_sources,
             shell_program: Some(hook_shell_program),
             shell_args: hook_shell_argv,
         });

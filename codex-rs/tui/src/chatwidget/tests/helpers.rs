@@ -81,6 +81,59 @@ pub(super) fn normalized_backend_snapshot<T: std::fmt::Display>(value: &T) -> St
         .join("\n")
 }
 
+pub(super) fn install_test_companion(
+    chat: &mut ChatWidget,
+    type_code: &str,
+    muted: bool,
+    format_mode: Option<&str>,
+) {
+    let state = CompanionState {
+        type_code: type_code.to_string(),
+        name: "Orbit".to_string(),
+        muted,
+        teaser_dismissed: true,
+        axes: None,
+        format_preferences: CompanionFormatPreferences {
+            headers_and_lists: format_mode.map(str::to_string),
+        },
+        persona_version: Some(2),
+    };
+    let entry = CompanionTypeEntry {
+        code: type_code.to_string(),
+        display_name: "Test Persona".to_string(),
+        default_name: "Orbit".to_string(),
+        summary: "Test summary".to_string(),
+        reaction_style: "playful".to_string(),
+        starter_quips: vec![
+            "Buddy is taking point.".to_string(),
+            "Buddy is checking the next tool.".to_string(),
+        ],
+        observer_quips: vec![
+            "Buddy wrapped the turn.".to_string(),
+            "Buddy has a note.".to_string(),
+            "Buddy found a decent signal.".to_string(),
+        ],
+        visual: CompanionVisual {
+            species: "otter".to_string(),
+            face: "(^_^)/".to_string(),
+            hat: "visor".to_string(),
+            motif: "constellations".to_string(),
+        },
+    };
+    let axes = state.normalized_axes();
+    let format_mode = CompanionHeadersAndListsMode::from_state(&state);
+    chat.companion_profile_cache = Some(CompanionProfile {
+        state,
+        entry,
+        persona_version: 2,
+        axes,
+        format_mode,
+        style_labels: companion_style_labels(axes),
+        characteristics: companion_characteristics(axes, format_mode),
+        trait_scores: CompanionTraitScores::from_axes(axes),
+    });
+}
+
 pub(super) fn invalid_value(
     candidate: impl Into<String>,
     allowed: impl Into<String>,
@@ -238,6 +291,8 @@ pub(super) async fn make_chatwidget_manual(
         reasoning_buffer: String::new(),
         full_reasoning_buffer: String::new(),
         current_status: StatusIndicatorState::working(),
+        companion_profile_cache: None,
+        companion_narration: CompanionNarrationState::default(),
         retry_status_header: None,
         pending_status_indicator_restore: false,
         suppress_queue_autosend: false,
@@ -911,6 +966,7 @@ pub(super) async fn assert_hook_events_snapshot(
                 completed_at: None,
                 duration_ms: None,
                 entries: vec![],
+                plugin_ui_events: vec![],
             },
         }),
     });
@@ -942,6 +998,7 @@ pub(super) async fn assert_hook_events_snapshot(
                         text: "Remember the startup checklist.".to_string(),
                     },
                 ],
+                plugin_ui_events: vec![],
             },
         }),
     });

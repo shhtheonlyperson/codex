@@ -54,6 +54,7 @@ pub enum SlashCommand {
     Stop,
     Clear,
     Personality,
+    Buddy,
     Realtime,
     Settings,
     TestApproval,
@@ -97,6 +98,7 @@ impl SlashCommand {
             SlashCommand::Model => "choose what model and reasoning effort to use",
             SlashCommand::Fast => "toggle Fast mode to enable fastest inference at 2X plan usage",
             SlashCommand::Personality => "choose a communication style for Codex",
+            SlashCommand::Buddy => "manage your companion and trigger buddy reactions",
             SlashCommand::Realtime => "toggle realtime voice mode (experimental)",
             SlashCommand::Settings => "configure realtime microphone/speaker",
             SlashCommand::Plan => "switch to Plan mode",
@@ -133,6 +135,7 @@ impl SlashCommand {
                 | SlashCommand::Plan
                 | SlashCommand::Fast
                 | SlashCommand::SandboxReadRoot
+                | SlashCommand::Buddy
         )
     }
 
@@ -172,6 +175,7 @@ impl SlashCommand {
             | SlashCommand::Apps
             | SlashCommand::Plugins
             | SlashCommand::Feedback
+            | SlashCommand::Buddy
             | SlashCommand::Quit
             | SlashCommand::Exit => true,
             SlashCommand::Rollout => true,
@@ -219,5 +223,12 @@ mod tests {
     #[test]
     fn clean_alias_parses_to_stop_command() {
         assert_eq!(SlashCommand::from_str("clean"), Ok(SlashCommand::Stop));
+    }
+
+    #[test]
+    fn buddy_command_parses_and_supports_inline_args() {
+        assert_eq!(SlashCommand::from_str("buddy"), Ok(SlashCommand::Buddy));
+        assert!(SlashCommand::Buddy.supports_inline_args());
+        assert!(SlashCommand::Buddy.available_during_task());
     }
 }

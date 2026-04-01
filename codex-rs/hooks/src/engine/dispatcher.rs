@@ -57,6 +57,7 @@ pub(crate) fn running_summary(handler: &ConfiguredHandler) -> HookRunSummary {
         completed_at: None,
         duration_ms: None,
         entries: Vec::new(),
+        plugin_ui_events: Vec::new(),
     }
 }
 
@@ -102,6 +103,7 @@ pub(crate) fn completed_summary(
         completed_at: Some(run_result.completed_at),
         duration_ms: Some(run_result.duration_ms),
         entries,
+        plugin_ui_events: Vec::new(),
     }
 }
 
@@ -138,6 +140,7 @@ mod tests {
             status_message: None,
             source_path: PathBuf::from("/tmp/hooks.json"),
             display_order,
+            env: Vec::new(),
         }
     }
 

@@ -236,10 +236,15 @@ fn parse_completed(
         },
     }
 
-    let completed = HookCompletedEvent {
+    let mut completed = HookCompletedEvent {
         turn_id,
         run: dispatcher::completed_summary(handler, &run_result, status, entries),
     };
+    if run_result.error.is_none()
+        && let Some(parsed) = output_parser::parse_stop(&run_result.stdout)
+    {
+        completed.run.plugin_ui_events = parsed.plugin_ui_events;
+    }
     let continuation_fragments = continuation_prompt
         .map(|prompt| {
             vec![HookPromptFragment::from_single_hook(
@@ -528,6 +533,7 @@ mod tests {
             status_message: None,
             source_path: PathBuf::from("/tmp/hooks.json"),
             display_order: 0,
+            env: Vec::new(),
         }
     }
 

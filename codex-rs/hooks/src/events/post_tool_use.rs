@@ -265,10 +265,15 @@ fn parse_completed(
         },
     }
 
-    let completed = HookCompletedEvent {
+    let mut completed = HookCompletedEvent {
         turn_id,
         run: dispatcher::completed_summary(handler, &run_result, status, entries),
     };
+    if run_result.error.is_none()
+        && let Some(parsed) = output_parser::parse_post_tool_use(&run_result.stdout)
+    {
+        completed.run.plugin_ui_events = parsed.plugin_ui_events;
+    }
 
     dispatcher::ParsedHandler {
         completed,
@@ -472,6 +477,7 @@ mod tests {
             status_message: Some("running post tool use hook".to_string()),
             source_path: PathBuf::from("/tmp/hooks.json"),
             display_order: 0,
+            env: Vec::new(),
         }
     }
 

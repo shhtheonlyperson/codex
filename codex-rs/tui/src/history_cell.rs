@@ -2154,6 +2154,32 @@ pub(crate) fn new_info_event(message: String, hint: Option<String>) -> PlainHist
     PlainHistoryCell { lines }
 }
 
+pub(crate) fn new_companion_event(
+    face: String,
+    name: String,
+    message: String,
+    headers_and_lists: bool,
+) -> PlainHistoryCell {
+    if headers_and_lists {
+        return PlainHistoryCell::new(vec![
+            Line::from(vec![
+                Span::styled(face, Style::default().cyan().bold()),
+                Span::raw(" "),
+                Span::styled(name, Style::default().cyan().bold()),
+            ]),
+            Line::from(vec!["  • ".dim(), Span::from(message)]),
+        ]);
+    }
+
+    PlainHistoryCell::new(vec![Line::from(vec![
+        Span::styled(face, Style::default().cyan().bold()),
+        Span::raw(" "),
+        Span::styled(format!("{name}:"), Style::default().cyan().bold()),
+        Span::raw(" "),
+        Span::from(message),
+    ])])
+}
+
 pub(crate) fn new_error_event(message: String) -> PlainHistoryCell {
     // Use a hair space (U+200A) to create a subtle, near-invisible separation
     // before the text. VS16 is intentionally omitted to keep spacing tighter

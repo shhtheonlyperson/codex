@@ -24,6 +24,10 @@ struct RawPluginManifest {
     #[serde(default)]
     apps: Option<String>,
     #[serde(default)]
+    hooks: Option<String>,
+    #[serde(default)]
+    ui: Option<RawPluginManifestUi>,
+    #[serde(default)]
     interface: Option<RawPluginManifestInterface>,
 }
 
@@ -32,6 +36,7 @@ pub(crate) struct PluginManifest {
     pub(crate) name: String,
     pub(crate) description: Option<String>,
     pub(crate) paths: PluginManifestPaths,
+    pub(crate) ui: Option<PluginManifestUi>,
     pub(crate) interface: Option<PluginManifestInterface>,
 }
 
@@ -40,6 +45,35 @@ pub struct PluginManifestPaths {
     pub skills: Option<AbsolutePathBuf>,
     pub mcp_servers: Option<AbsolutePathBuf>,
     pub apps: Option<AbsolutePathBuf>,
+    pub hooks: Option<AbsolutePathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginManifestUi {
+    pub footer_widget: Option<PluginManifestFooterWidget>,
+    pub bottom_float: Option<PluginManifestBottomFloat>,
+    pub prompt_reserve_columns: Option<PluginManifestPromptReserveColumns>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginManifestFooterWidget {
+    pub renderer: String,
+    pub narrow_breakpoint: Option<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginManifestBottomFloat {
+    pub renderer: String,
+    pub fullscreen_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginManifestPromptReserveColumns {
+    pub strategy: String,
+    pub min_columns: Option<u16>,
+    pub padding_columns: Option<u16>,
+    pub speaking_bonus: Option<u16>,
+    pub max_columns: Option<u16>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -96,6 +130,47 @@ struct RawPluginManifestInterface {
     screenshots: Vec<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawPluginManifestUi {
+    #[serde(default)]
+    footer_widget: Option<RawPluginManifestFooterWidget>,
+    #[serde(default)]
+    bottom_float: Option<RawPluginManifestBottomFloat>,
+    #[serde(default)]
+    prompt_reserve_columns: Option<RawPluginManifestPromptReserveColumns>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawPluginManifestFooterWidget {
+    renderer: String,
+    #[serde(default)]
+    narrow_breakpoint: Option<u16>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawPluginManifestBottomFloat {
+    renderer: String,
+    #[serde(default)]
+    fullscreen_only: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawPluginManifestPromptReserveColumns {
+    strategy: String,
+    #[serde(default)]
+    min_columns: Option<u16>,
+    #[serde(default)]
+    padding_columns: Option<u16>,
+    #[serde(default)]
+    speaking_bonus: Option<u16>,
+    #[serde(default)]
+    max_columns: Option<u16>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum RawPluginManifestDefaultPrompt {
@@ -125,6 +200,8 @@ pub(crate) fn load_plugin_manifest(plugin_root: &Path) -> Option<PluginManifest>
                 skills,
                 mcp_servers,
                 apps,
+                hooks,
+                ui,
                 interface,
             } = manifest;
             let name = plugin_root
@@ -133,6 +210,7 @@ pub(crate) fn load_plugin_manifest(plugin_root: &Path) -> Option<PluginManifest>
                 .filter(|_| raw_name.trim().is_empty())
                 .unwrap_or(&raw_name)
                 .to_string();
+            let ui = ui.and_then(|ui| resolve_ui(plugin_root, ui));
             let interface = interface.and_then(|interface| {
                 let RawPluginManifestInterface {
                     display_name,
@@ -213,7 +291,9 @@ pub(crate) fn load_plugin_manifest(plugin_root: &Path) -> Option<PluginManifest>
                         mcp_servers.as_deref(),
                     ),
                     apps: resolve_manifest_path(plugin_root, "apps", apps.as_deref()),
+                    hooks: resolve_manifest_path(plugin_root, "hooks", hooks.as_deref()),
                 },
+                ui,
                 interface,
             })
         }
@@ -225,6 +305,52 @@ pub(crate) fn load_plugin_manifest(plugin_root: &Path) -> Option<PluginManifest>
             None
         }
     }
+}
+
+fn resolve_ui(_plugin_root: &Path, ui: RawPluginManifestUi) -> Option<PluginManifestUi> {
+    let footer_widget = ui.footer_widget.and_then(|footer| {
+        let renderer = footer.renderer.trim().to_string();
+        if renderer.is_empty() {
+            tracing::warn!("ignoring ui.footerWidget: renderer must not be empty");
+            return None;
+        }
+        Some(PluginManifestFooterWidget {
+            renderer,
+            narrow_breakpoint: footer.narrow_breakpoint,
+        })
+    });
+    let bottom_float = ui.bottom_float.and_then(|float| {
+        let renderer = float.renderer.trim().to_string();
+        if renderer.is_empty() {
+            tracing::warn!("ignoring ui.bottomFloat: renderer must not be empty");
+            return None;
+        }
+        Some(PluginManifestBottomFloat {
+            renderer,
+            fullscreen_only: float.fullscreen_only,
+        })
+    });
+    let prompt_reserve_columns = ui.prompt_reserve_columns.and_then(|prompt| {
+        let strategy = prompt.strategy.trim().to_string();
+        if strategy.is_empty() {
+            tracing::warn!("ignoring ui.promptReserveColumns: strategy must not be empty");
+            return None;
+        }
+        Some(PluginManifestPromptReserveColumns {
+            strategy,
+            min_columns: prompt.min_columns,
+            padding_columns: prompt.padding_columns,
+            speaking_bonus: prompt.speaking_bonus,
+            max_columns: prompt.max_columns,
+        })
+    });
+
+    (footer_widget.is_some() || bottom_float.is_some() || prompt_reserve_columns.is_some())
+        .then_some(PluginManifestUi {
+            footer_widget,
+            bottom_float,
+            prompt_reserve_columns,
+        })
 }
 
 fn resolve_interface_asset_path(

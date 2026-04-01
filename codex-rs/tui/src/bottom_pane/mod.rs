@@ -76,6 +76,7 @@ pub(crate) struct MentionBinding {
 mod chat_composer;
 mod chat_composer_history;
 mod command_popup;
+mod companion_widget;
 pub mod custom_prompt_view;
 mod experimental_features_view;
 mod file_search_popup;
@@ -146,6 +147,9 @@ use crate::bottom_pane::prompt_args::parse_slash_name;
 pub(crate) use chat_composer::ChatComposer;
 pub(crate) use chat_composer::ChatComposerConfig;
 pub(crate) use chat_composer::InputResult;
+use companion_widget::CompanionComposerLayout;
+use companion_widget::CompanionFloat;
+use companion_widget::CompanionWidget;
 
 use crate::status_indicator_widget::StatusDetailsCapitalization;
 use crate::status_indicator_widget::StatusIndicatorWidget;
@@ -188,6 +192,7 @@ pub(crate) struct BottomPane {
     pending_input_preview: PendingInputPreview,
     /// Inactive threads with pending approval requests.
     pending_thread_approvals: PendingThreadApprovals,
+    companion_widget: CompanionWidget,
     context_window_percent: Option<i64>,
     context_window_used_tokens: Option<i64>,
 }
@@ -237,6 +242,7 @@ impl BottomPane {
             unified_exec_footer: UnifiedExecFooter::new(),
             pending_input_preview: PendingInputPreview::new(),
             pending_thread_approvals: PendingThreadApprovals::new(),
+            companion_widget: CompanionWidget::new(animations_enabled),
             esc_backtrack_hint: false,
             animations_enabled,
             context_window_percent: None,
@@ -509,6 +515,12 @@ impl BottomPane {
 
     pub(crate) fn pre_draw_tick(&mut self) {
         self.composer.sync_popups();
+        if self.companion_widget.prune_expired() {
+            self.request_redraw();
+        }
+        if let Some(delay) = self.companion_widget.schedule_next_frame_delay() {
+            self.request_redraw_in(delay);
+        }
     }
 
     /// Replace the composer text with `text`.
@@ -1159,7 +1171,16 @@ impl BottomPane {
             }
             let mut flex2 = FlexRenderable::new();
             flex2.push(/*flex*/ 1, RenderableItem::Owned(flex.into()));
-            flex2.push(/*flex*/ 0, RenderableItem::Borrowed(&self.composer));
+            if self.companion_widget.is_visible() {
+                flex2.push(
+                    /*flex*/ 0,
+                    RenderableItem::Owned(
+                        CompanionComposerLayout::new(&self.composer, &self.companion_widget).into(),
+                    ),
+                );
+            } else {
+                flex2.push(/*flex*/ 0, RenderableItem::Borrowed(&self.composer));
+            }
             RenderableItem::Owned(Box::new(flex2))
         }
     }
@@ -1174,6 +1195,24 @@ impl BottomPane {
         if self.composer.set_status_line_enabled(enabled) {
             self.request_redraw();
         }
+    }
+
+    pub(crate) fn apply_plugin_ui_events(
+        &mut self,
+        events: &[codex_protocol::protocol::PluginUiEvent],
+    ) {
+        if self.companion_widget.apply_events(events) {
+            self.request_redraw();
+        }
+    }
+
+    pub(crate) fn companion_float(&self) -> Option<CompanionFloat<'_>> {
+        if self.active_view().is_some() {
+            return None;
+        }
+        self.companion_widget
+            .should_render_float(u16::MAX)
+            .then(|| CompanionFloat::new(&self.companion_widget))
     }
 
     /// Updates the contextual footer label and requests a redraw only when it changed.

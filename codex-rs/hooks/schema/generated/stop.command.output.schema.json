@@ -7,6 +7,175 @@
         "block"
       ],
       "type": "string"
+    },
+    "PluginUiAnimationWire": {
+      "additionalProperties": false,
+      "properties": {
+        "idleFrameMs": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "idleFrames": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "petFrameMs": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "petFrames": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "reactionFrameMs": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "reactionFrames": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "PluginUiEventWire": {
+      "oneOf": [
+        {
+          "properties": {
+            "animation": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/PluginUiAnimationWire"
+                }
+              ],
+              "default": null
+            },
+            "badge": {
+              "default": null,
+              "type": "string"
+            },
+            "color": {
+              "default": null,
+              "type": "string"
+            },
+            "event": {
+              "enum": [
+                "presence"
+              ],
+              "type": "string"
+            },
+            "face": {
+              "default": null,
+              "type": "string"
+            },
+            "label": {
+              "default": null,
+              "type": "string"
+            },
+            "muted": {
+              "default": false,
+              "type": "boolean"
+            },
+            "plugin": {
+              "type": "string"
+            },
+            "reservedColumns": {
+              "default": null,
+              "format": "uint16",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "species": {
+              "default": null,
+              "type": "string"
+            },
+            "subtitle": {
+              "default": null,
+              "type": "string"
+            },
+            "visible": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "event",
+            "plugin",
+            "visible"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "event": {
+              "enum": [
+                "reaction"
+              ],
+              "type": "string"
+            },
+            "kind": {
+              "default": null,
+              "type": "string"
+            },
+            "plugin": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "ttlMs": {
+              "default": null,
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "event",
+            "plugin",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "event": {
+              "enum": [
+                "pet"
+              ],
+              "type": "string"
+            },
+            "plugin": {
+              "type": "string"
+            },
+            "ttlMs": {
+              "default": null,
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "event",
+            "plugin"
+          ],
+          "type": "object"
+        }
+      ]
     }
   },
   "properties": {
@@ -21,6 +190,13 @@
         }
       ],
       "default": null
+    },
+    "pluginUiEvents": {
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/PluginUiEventWire"
+      },
+      "type": "array"
     },
     "reason": {
       "default": null,

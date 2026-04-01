@@ -1481,6 +1481,47 @@ pub struct HookOutputEntry {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
+pub struct PluginUiAnimation {
+    pub idle_frames: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reaction_frames: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pet_frames: Vec<String>,
+    pub idle_frame_ms: Option<u64>,
+    pub reaction_frame_ms: Option<u64>,
+    pub pet_frame_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum PluginUiEvent {
+    Presence {
+        plugin: String,
+        visible: bool,
+        muted: bool,
+        label: Option<String>,
+        subtitle: Option<String>,
+        badge: Option<String>,
+        face: Option<String>,
+        color: Option<String>,
+        species: Option<String>,
+        reserved_columns: Option<u16>,
+        animation: Option<PluginUiAnimation>,
+    },
+    Reaction {
+        plugin: String,
+        text: String,
+        kind: Option<String>,
+        ttl_ms: Option<u64>,
+    },
+    Pet {
+        plugin: String,
+        ttl_ms: Option<u64>,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
 pub struct HookRunSummary {
     pub id: String,
     pub event_name: HookEventName,
@@ -1498,6 +1539,8 @@ pub struct HookRunSummary {
     #[ts(type = "number | null")]
     pub duration_ms: Option<i64>,
     pub entries: Vec<HookOutputEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugin_ui_events: Vec<PluginUiEvent>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]

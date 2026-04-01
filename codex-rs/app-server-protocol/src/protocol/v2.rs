@@ -65,6 +65,8 @@ use codex_protocol::protocol::ModelRerouteReason as CoreModelRerouteReason;
 use codex_protocol::protocol::NetworkAccess as CoreNetworkAccess;
 use codex_protocol::protocol::NonSteerableTurnKind as CoreNonSteerableTurnKind;
 use codex_protocol::protocol::PatchApplyStatus as CorePatchApplyStatus;
+use codex_protocol::protocol::PluginUiAnimation as CorePluginUiAnimation;
+use codex_protocol::protocol::PluginUiEvent as CorePluginUiEvent;
 use codex_protocol::protocol::RateLimitSnapshot as CoreRateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow as CoreRateLimitWindow;
 use codex_protocol::protocol::ReadOnlyAccess as CoreReadOnlyAccess;
@@ -428,6 +430,108 @@ impl From<CoreHookOutputEntry> for HookOutputEntry {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct PluginUiAnimation {
+    pub idle_frames: Vec<String>,
+    pub reaction_frames: Vec<String>,
+    pub pet_frames: Vec<String>,
+    pub idle_frame_ms: Option<u64>,
+    pub reaction_frame_ms: Option<u64>,
+    pub pet_frame_ms: Option<u64>,
+}
+
+impl From<CorePluginUiAnimation> for PluginUiAnimation {
+    fn from(value: CorePluginUiAnimation) -> Self {
+        Self {
+            idle_frames: value.idle_frames,
+            reaction_frames: value.reaction_frames,
+            pet_frames: value.pet_frames,
+            idle_frame_ms: value.idle_frame_ms,
+            reaction_frame_ms: value.reaction_frame_ms,
+            pet_frame_ms: value.pet_frame_ms,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(tag = "event", rename_all = "camelCase")]
+#[ts(tag = "event")]
+#[ts(export_to = "v2/")]
+pub enum PluginUiEvent {
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    Presence {
+        plugin: String,
+        visible: bool,
+        muted: bool,
+        label: Option<String>,
+        subtitle: Option<String>,
+        badge: Option<String>,
+        face: Option<String>,
+        color: Option<String>,
+        species: Option<String>,
+        reserved_columns: Option<u16>,
+        animation: Option<PluginUiAnimation>,
+    },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    Reaction {
+        plugin: String,
+        text: String,
+        kind: Option<String>,
+        ttl_ms: Option<u64>,
+    },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    Pet { plugin: String, ttl_ms: Option<u64> },
+}
+
+impl From<CorePluginUiEvent> for PluginUiEvent {
+    fn from(value: CorePluginUiEvent) -> Self {
+        match value {
+            CorePluginUiEvent::Presence {
+                plugin,
+                visible,
+                muted,
+                label,
+                subtitle,
+                badge,
+                face,
+                color,
+                species,
+                reserved_columns,
+                animation,
+            } => Self::Presence {
+                plugin,
+                visible,
+                muted,
+                label,
+                subtitle,
+                badge,
+                face,
+                color,
+                species,
+                reserved_columns,
+                animation: animation.map(Into::into),
+            },
+            CorePluginUiEvent::Reaction {
+                plugin,
+                text,
+                kind,
+                ttl_ms,
+            } => Self::Reaction {
+                plugin,
+                text,
+                kind,
+                ttl_ms,
+            },
+            CorePluginUiEvent::Pet { plugin, ttl_ms } => Self::Pet { plugin, ttl_ms },
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct HookRunSummary {
     pub id: String,
     pub event_name: HookEventName,
@@ -442,6 +546,7 @@ pub struct HookRunSummary {
     pub completed_at: Option<i64>,
     pub duration_ms: Option<i64>,
     pub entries: Vec<HookOutputEntry>,
+    pub plugin_ui_events: Vec<PluginUiEvent>,
 }
 
 impl From<CoreHookRunSummary> for HookRunSummary {
@@ -460,6 +565,7 @@ impl From<CoreHookRunSummary> for HookRunSummary {
             completed_at: value.completed_at,
             duration_ms: value.duration_ms,
             entries: value.entries.into_iter().map(Into::into).collect(),
+            plugin_ui_events: value.plugin_ui_events.into_iter().map(Into::into).collect(),
         }
     }
 }

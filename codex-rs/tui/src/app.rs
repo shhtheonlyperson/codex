@@ -2,6 +2,7 @@ use crate::app_backtrack::BacktrackState;
 use crate::app_command::AppCommand;
 use crate::app_command::AppCommandView;
 use crate::app_event::AppEvent;
+use crate::app_event::CompanionAction;
 use crate::app_event::ExitMode;
 use crate::app_event::FeedbackCategory;
 use crate::app_event::RealtimeAudioDeviceKind;
@@ -5356,6 +5357,11 @@ impl App {
             AppEvent::OpenReviewCustomPrompt => {
                 self.chat_widget.show_review_custom_prompt();
             }
+            AppEvent::CompanionAction(action) => match action {
+                CompanionAction::RunBuddyCommand { args } => {
+                    self.chat_widget.run_buddy_command(args);
+                }
+            },
             AppEvent::SubmitUserMessageWithMode {
                 text,
                 collaboration_mode,
@@ -9257,6 +9263,7 @@ guardian_approval = true
                 completed_at: None,
                 duration_ms: None,
                 entries: Vec::new(),
+                plugin_ui_events: Vec::new(),
             },
         })
     }
@@ -9288,6 +9295,7 @@ guardian_approval = true
                         text: "prompt blocked".to_string(),
                     },
                 ],
+                plugin_ui_events: Vec::new(),
             },
         })
     }

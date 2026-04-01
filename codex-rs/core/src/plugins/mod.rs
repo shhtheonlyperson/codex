@@ -46,6 +46,7 @@ pub use manager::load_plugin_mcp_servers;
 pub use manager::plugin_telemetry_metadata_from_root;
 pub use manifest::PluginManifestInterface;
 pub(crate) use manifest::PluginManifestPaths;
+pub use manifest::PluginManifestUi;
 pub(crate) use manifest::load_plugin_manifest;
 pub use marketplace::MarketplaceError;
 pub use marketplace::MarketplaceListError;

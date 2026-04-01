@@ -66,6 +66,67 @@ pub(crate) struct HookUniversalOutputWire {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PluginUiAnimationWire {
+    #[serde(default)]
+    pub idle_frames: Vec<String>,
+    #[serde(default)]
+    pub reaction_frames: Vec<String>,
+    #[serde(default)]
+    pub pet_frames: Vec<String>,
+    #[serde(default)]
+    pub idle_frame_ms: Option<u64>,
+    #[serde(default)]
+    pub reaction_frame_ms: Option<u64>,
+    #[serde(default)]
+    pub pet_frame_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "event", rename_all = "camelCase")]
+pub(crate) enum PluginUiEventWire {
+    #[serde(rename_all = "camelCase")]
+    Presence {
+        plugin: String,
+        visible: bool,
+        #[serde(default)]
+        muted: bool,
+        #[serde(default)]
+        label: Option<String>,
+        #[serde(default)]
+        subtitle: Option<String>,
+        #[serde(default)]
+        badge: Option<String>,
+        #[serde(default)]
+        face: Option<String>,
+        #[serde(default)]
+        color: Option<String>,
+        #[serde(default)]
+        species: Option<String>,
+        #[serde(default)]
+        reserved_columns: Option<u16>,
+        #[serde(default)]
+        animation: Option<PluginUiAnimationWire>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Reaction {
+        plugin: String,
+        text: String,
+        #[serde(default)]
+        kind: Option<String>,
+        #[serde(default)]
+        ttl_ms: Option<u64>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Pet {
+        plugin: String,
+        #[serde(default)]
+        ttl_ms: Option<u64>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub(crate) enum HookEventNameWire {
     #[serde(rename = "PreToolUse")]
     PreToolUse,
@@ -92,6 +153,8 @@ pub(crate) struct PreToolUseCommandOutputWire {
     pub reason: Option<String>,
     #[serde(default)]
     pub hook_specific_output: Option<PreToolUseHookSpecificOutputWire>,
+    #[serde(default)]
+    pub plugin_ui_events: Vec<PluginUiEventWire>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -107,6 +170,8 @@ pub(crate) struct PostToolUseCommandOutputWire {
     pub reason: Option<String>,
     #[serde(default)]
     pub hook_specific_output: Option<PostToolUseHookSpecificOutputWire>,
+    #[serde(default)]
+    pub plugin_ui_events: Vec<PluginUiEventWire>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -218,6 +283,8 @@ pub(crate) struct SessionStartCommandOutputWire {
     pub universal: HookUniversalOutputWire,
     #[serde(default)]
     pub hook_specific_output: Option<SessionStartHookSpecificOutputWire>,
+    #[serde(default)]
+    pub plugin_ui_events: Vec<PluginUiEventWire>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -242,6 +309,8 @@ pub(crate) struct UserPromptSubmitCommandOutputWire {
     pub reason: Option<String>,
     #[serde(default)]
     pub hook_specific_output: Option<UserPromptSubmitHookSpecificOutputWire>,
+    #[serde(default)]
+    pub plugin_ui_events: Vec<PluginUiEventWire>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -266,6 +335,8 @@ pub(crate) struct StopCommandOutputWire {
     /// semantic rule during output parsing rather than in the JSON schema.
     #[serde(default)]
     pub reason: Option<String>,
+    #[serde(default)]
+    pub plugin_ui_events: Vec<PluginUiEventWire>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
