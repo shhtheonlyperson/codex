@@ -2,6 +2,9 @@ use super::*;
 use codex_config::types::ShellEnvironmentPolicyInherit;
 use maplit::hashmap;
 
+use crate::spawn::CODEX_SANDBOX_ENV_VAR;
+use crate::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
+
 fn make_vars(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
     pairs
         .iter()
@@ -144,6 +147,54 @@ fn test_inherit_all() {
     let result = populate_env(vars.clone(), &policy, Some(thread_id));
     let mut expected: HashMap<String, String> = vars.into_iter().collect();
     expected.insert(CODEX_THREAD_ID_ENV_VAR.to_string(), thread_id.to_string());
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_inherit_all_strips_internal_sandbox_markers() {
+    let vars = make_vars(&[
+        ("PATH", "/usr/bin"),
+        (CODEX_SANDBOX_ENV_VAR, "seatbelt"),
+        (CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR, "1"),
+    ]);
+
+    let policy = ShellEnvironmentPolicy {
+        inherit: ShellEnvironmentPolicyInherit::All,
+        ignore_default_excludes: true,
+        ..Default::default()
+    };
+
+    let thread_id = ThreadId::new();
+    let result = populate_env(vars, &policy, Some(thread_id));
+    let mut expected: HashMap<String, String> = hashmap! {
+        "PATH".to_string() => "/usr/bin".to_string(),
+    };
+    expected.insert(CODEX_THREAD_ID_ENV_VAR.to_string(), thread_id.to_string());
+
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_set_can_reintroduce_internal_sandbox_markers() {
+    let vars = make_vars(&[(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR, "1")]);
+
+    let mut policy = ShellEnvironmentPolicy {
+        inherit: ShellEnvironmentPolicyInherit::All,
+        ignore_default_excludes: true,
+        ..Default::default()
+    };
+    policy.r#set.insert(
+        CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR.to_string(),
+        "override".to_string(),
+    );
+
+    let thread_id = ThreadId::new();
+    let result = populate_env(vars, &policy, Some(thread_id));
+    let mut expected: HashMap<String, String> = hashmap! {
+        CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR.to_string() => "override".to_string(),
+    };
+    expected.insert(CODEX_THREAD_ID_ENV_VAR.to_string(), thread_id.to_string());
+
     assert_eq!(result, expected);
 }
 

@@ -5,6 +5,9 @@ use codex_protocol::ThreadId;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
+use crate::spawn::CODEX_SANDBOX_ENV_VAR;
+use crate::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
+
 pub const CODEX_THREAD_ID_ENV_VAR: &str = "CODEX_THREAD_ID";
 
 /// Construct an environment map based on the rules in the specified policy. The
@@ -54,6 +57,8 @@ where
             vars.into_iter().filter(|(k, _)| is_core_var(k)).collect()
         }
     };
+    env_map.remove(CODEX_SANDBOX_ENV_VAR);
+    env_map.remove(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR);
 
     // Internal helper – does `name` match **any** pattern in `patterns`?
     let matches_any = |name: &str, patterns: &[EnvironmentVariablePattern]| -> bool {
